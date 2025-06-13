@@ -64,6 +64,7 @@ class PongReplay:
     def _load_log(path: Path):
         with open(path, "r", encoding="utf-8") as f:
             lines = f.read().splitlines()
+        lines = list(l for l in lines if l[0] != '#')
         cfg = json.loads(lines[0])
         states = [json.loads(l) for l in lines[1:]]
         return cfg, states

@@ -1,5 +1,6 @@
 use std::sync::atomic::{ AtomicU8, Ordering };
 use std::path::Path;
+use std::fs::OpenOptions;
 use std::time::{ Duration, SystemTime };
 use std::ops::{ Deref, DerefMut, Drop };
 use std::hint;
@@ -32,26 +33,26 @@ pub enum ShmStage {
 }
 
 #[repr(transparent)]
-pub struct LockedStage<'a> {
+pub struct LockedStage<'a, const R: u8> {
     inner: &'a mut Shm
 }
 
-impl<'a> Deref for LockedStage<'a> {
+impl<'a, const R: u8> Deref for LockedStage<'a, R> {
     type Target = ShmStage;
     fn deref(&self) -> &Self::Target {
         &self.inner.stage
     }
 }
 
-impl<'a> DerefMut for LockedStage<'a> {
+impl<'a, const R: u8> DerefMut for LockedStage<'a, R> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.inner.stage
     }
 }
 
-impl Drop for LockedStage<'_> {
+impl<const R: u8> Drop for LockedStage<'_, R> {
     fn drop(&mut self) {
-        self.inner.sync.store(ENGINE_READY, Ordering::Release);
+        self.inner.sync.store(R, Ordering::Release);
     }
 }
 
@@ -61,6 +62,24 @@ struct Shm {
     sync:      AtomicU8,
     msg:       [u8; TELEMETRY_SZ - 1],
     msg_sync:  AtomicU8
+}
+
+async fn cas_poll(au8: &AtomicU8, cmp: u8, swp: u8) {
+    for i in 0.. {
+        if au8.compare_exchange_weak(
+            cmp,
+            swp,
+            Ordering::Acquire,
+            Ordering::Relaxed
+        ).is_ok() {
+            return;
+        }
+        match i {
+            0..100 => hint::spin_loop(),
+            100..1000 => tokio::task::yield_now().await,
+            _ => tokio::time::sleep(Duration::from_micros(i / 10)).await,
+        }
+    }
 }
 
 pub struct BotChannel {
@@ -91,30 +110,43 @@ impl BotChannel {
         }
     }
 
-    pub async fn lock(&self) -> LockedStage {
-        for i in 0.. {
-            if self.shm().sync.compare_exchange_weak(
-                ENGINE_READY, 
-                ENGINE_BUSY, 
-                Ordering::Acquire, 
-                Ordering::Relaxed
-            ).is_ok() {
-                return LockedStage { inner: self.shm() };
-            }
-        
-            match i {
-                0..100 => hint::spin_loop(),
-                100..1000 => tokio::task::yield_now().await,
-                _ => tokio::time::sleep(Duration::from_micros(100)).await,
-            }
-        }
-
-        unreachable!()
+    pub async fn lock(&self) -> LockedStage<ENGINE_READY> {
+        cas_poll(&self.shm().sync, ENGINE_READY, ENGINE_BUSY).await;
+        LockedStage { inner: self.shm() }
     }
 }
 
 impl Drop for BotChannel {
     fn drop(&mut self) {
         self.shm().sync.store(ENGINE_FINISHED, Ordering::Release);
+    }
+}
+
+pub struct EngineChannel {
+    mmap: MmapMut
+}
+
+impl EngineChannel {
+    pub fn from_path<P: AsRef<Path>>(path: P) -> Self {
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+            .unwrap();
+
+        Self {
+            mmap: unsafe { MmapMut::map_mut(&file).unwrap() }
+        }
+    }
+
+    fn shm<'a>(&'a self) -> &'a mut Shm { // TODO worry about validation
+        unsafe {
+            &mut *(self.mmap.as_ptr() as *mut Shm)
+        }
+    }
+
+    pub async fn lock(&self) -> LockedStage<ENGINE_BUSY> {
+        cas_poll(&self.shm().sync, ENGINE_BUSY, ENGINE_READY).await;
+        LockedStage { inner: self.shm() }
     }
 }
