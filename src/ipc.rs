@@ -20,7 +20,22 @@ pub const TELEMETRY_SZ:  usize = 1024;
 pub const TELEMETRY_OLD: u8 = 0;
 pub const TELEMETRY_NEW: u8 = 1;
 
-#[repr(C)]
+#[derive(Debug)]
+pub enum DerefError {
+    AlignmentError {
+        address: usize,
+        alignment: usize,
+    },
+    InvalidDiscriminant(u8),
+    SizeMismatch {
+        expected: usize,
+        actual:   usize,
+    }
+}
+
+pub type DerefResult<T> = Result<T, DerefError>;
+
+#[repr(C, u8)] 
 pub enum ShmStage {
     Init {
         config:     GameConfig,
@@ -82,6 +97,34 @@ async fn cas_poll(au8: &AtomicU8, cmp: u8, swp: u8) {
     }
 }
 
+fn try_deref<'a>(mmap: &MmapMut) -> DerefResult<&'a mut Shm> {
+    let addr = mmap.as_ptr() as usize;
+    let len  = mmap.deref().len();
+    let align = align_of::<Shm>();  
+    if addr % align != 0 {
+        return Err(DerefError::AlignmentError { address: addr, alignment: align });
+    }
+    if len != size_of::<Shm>() {
+        return Err(DerefError::SizeMismatch { expected: size_of::<Shm>(), actual: len });
+    }
+
+    if (mmap.as_ptr() as usize) % align_of::<Shm>() != 0 {
+        return Err(DerefError::AlignmentError {
+            address:    mmap.as_ptr() as usize,
+            alignment:  align_of::<Shm>()
+        })
+    }
+
+    let discriminant = mmap.deref()[std::mem::offset_of!(Shm, stage)];
+    if (0..2).contains(&discriminant) { // TODO make this more enum agnostic
+        return Err(DerefError::InvalidDiscriminant(discriminant));
+    }
+
+    Ok(unsafe {
+        &mut *(mmap.as_ptr() as *mut Shm)
+    })
+}
+
 pub struct BotChannel {
     bkgfd:      tempfile::NamedTempFile,
     mmap:       MmapMut,
@@ -96,7 +139,7 @@ impl BotChannel {
             bkgfd: tf,
             mmap
         };
-        ret.shm().sync.store(ENGINE_BUSY, Ordering::Release);
+        try_deref(&ret.mmap).unwrap().sync.store(ENGINE_BUSY, Ordering::Release);
         return ret;
     }
     
@@ -104,15 +147,9 @@ impl BotChannel {
         self.bkgfd.path()
     }
 
-    fn shm<'a>(&'a self) -> &'a mut Shm { // TODO worry about validation
-        unsafe {
-            &mut *(self.mmap.as_ptr() as *mut Shm)
-        }
-    }
-
-    pub async fn lock(&self) -> LockedStage<ENGINE_READY> {
+    pub async fn lock(&self) -> DerefResult<LockedStage<ENGINE_READY>> {
         cas_poll(&self.shm().sync, ENGINE_READY, ENGINE_BUSY).await;
-        LockedStage { inner: self.shm() }
+        Ok(LockedStage { inner: try_deref(&self.mmap)? })
     }
 }
 
