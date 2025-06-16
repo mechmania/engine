@@ -2,14 +2,24 @@ use game_runner::{
     game::{run_tick, GameConfig, GameState},
     ipc::{BotChannel, ShmStage},
 };
-use std::process::{Command, Stdio};
-use std::time::{Duration, Instant};
+use anyhow::{ Context, Result };
+use std::process::Command;
+use std::time::{ Instant, Duration };
+use tokio::time::timeout;
+
+const BOT_TIMEOUT: Duration = Duration::from_millis(1000);
 
 #[tokio::main]
 async fn main() {
+    if let Err(e) = run().await {
+        eprintln!("{:?}", e.context("a fatal error occured"));
+    }
+}
+
+async fn run() -> Result<()> {
     let conf = GameConfig {
-        height: 200,
-        width: 400,
+        height: 400,
+        width: 800,
         paddle_length: 30,
         paddle_width: 5,
         ball_radius: 5,
@@ -19,24 +29,22 @@ async fn main() {
     };
 
     let on_init = |_| 0.0;
-    //let on_tick = |_, state: &GameState| {
-    let on_tick = |_, _: &GameState| {
-        0.0
-        //if state.ball_pos.1 > state.p0_pos {
-        //    1.0
-        //} else {
-        //    -1.0
-        //}
+    let on_tick = |_, state: &GameState| {
+        if state.ball_pos.1 > state.p0_pos {
+            1.0
+         else {
+            -1.0
+        }
     };
 
-    println!("{}", serde_json::to_string(&conf).expect("parse err"));
+    println!("{}", serde_json::to_string(&conf)?);
 
     let p1 = BotChannel::new();
 
     let _ = Command::new("./target/debug/bot")
         .arg(p1.backing_file_path())
         .spawn()
-        .unwrap();
+        .with_context(|| "failed to launch bot")?;
 
     let start = Instant::now();
 
@@ -72,7 +80,9 @@ async fn main() {
         && state.p0_score < conf.winning_score
         && state.p1_score < conf.winning_score
     {
-        let mut stage = p1.lock().await;
+        let mut stage = timeout(BOT_TIMEOUT, p1.lock())
+                            .await
+                            .with_context(|| "bot timed out")?;
 
         let ShmStage::Tick {
             state: ref mut shm_state,
@@ -91,4 +101,5 @@ async fn main() {
     }
 
     println!("# time elapsed: {:?}", start.elapsed());
+    Ok(())
 }

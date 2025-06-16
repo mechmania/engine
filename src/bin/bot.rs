@@ -25,7 +25,7 @@ async fn main () {
                 //} else {
                 //    -1.0
                 //}
-                *action = 0.0;
+                *action = 0.0
             }
         }
     }
