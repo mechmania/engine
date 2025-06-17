@@ -1,62 +1,53 @@
-use std::{
-    sync::atomic::{ AtomicU8, Ordering },
-    path::Path,
-    fs::OpenOptions,
-    time::Duration,
-    ops::{ Deref, DerefMut, Drop },
-    mem::offset_of,
-    hint,
-};
+use anyhow::Context;
 use memmap::MmapMut;
-use thiserror::Error;
-use crate::game::{
-    GameState, 
-    GameConfig,
-    TickAction,
-    InitAction,
+use std::{
+    fs::OpenOptions,
+    hint,
+    mem::offset_of,
+    ops::{Deref, DerefMut, Drop},
+    path::Path,
+    sync::atomic::{AtomicU8, Ordering},
+    time::Duration,
 };
+use thiserror::Error;
 
-pub const ENGINE_READY:    u8 = 0;
-pub const ENGINE_BUSY:     u8 = 1;
+use crate::game::{GameConfig, GameState, InitAction, TickAction};
+
+pub const ENGINE_READY: u8 = 0;
+pub const ENGINE_BUSY: u8 = 1;
 pub const ENGINE_FINISHED: u8 = 2;
 
-pub const TELEMETRY_SZ:  usize = 1024;
+pub const TELEMETRY_SZ: usize = 1024;
 pub const TELEMETRY_OLD: u8 = 0;
 pub const TELEMETRY_NEW: u8 = 1;
 
 #[derive(Error, Debug)]
 pub enum DerefError {
     #[error("memory misaligned at 0x{address:x}, expecting alignment of 0x{alignment:x}")]
-    AlignmentError {
-        address: usize,
-        alignment: usize,
-    },
+    AlignmentError { address: usize, alignment: usize },
     #[error("invalid enum discriminant {0}")]
     InvalidDiscriminant(u8),
     #[error("size mismatch (expected {expected}, actual {actual})")]
-    SizeMismatch {
-        expected: usize,
-        actual:   usize,
-    }
+    SizeMismatch { expected: usize, actual: usize },
 }
 
 pub type DerefResult<T> = Result<T, DerefError>;
 
-#[repr(C, u8)] 
+#[repr(C, u8)]
 pub enum ShmStage {
     Init {
-        config:     GameConfig,
-        action:     InitAction,
+        config: GameConfig,
+        action: InitAction,
     },
     Tick {
-        state:      GameState,
-        action:     TickAction,
-    }
+        state: GameState,
+        action: TickAction,
+    },
 }
 
 #[repr(transparent)]
 pub struct LockedStage<'a, const R: u8> {
-    inner: &'a mut Shm
+    inner: &'a mut Shm,
 }
 
 impl<'a, const R: u8> Deref for LockedStage<'a, R> {
@@ -80,20 +71,18 @@ impl<const R: u8> Drop for LockedStage<'_, R> {
 
 #[repr(C)]
 struct Shm {
-    stage:     ShmStage,
-    sync:      AtomicU8,
-    msg:       [u8; TELEMETRY_SZ - 1],
-    msg_sync:  AtomicU8
+    stage: ShmStage,
+    sync: AtomicU8,
+    msg: [u8; TELEMETRY_SZ - 1],
+    msg_sync: AtomicU8,
 }
 
 async fn cas_poll(au8: &AtomicU8, cmp: u8, swp: u8) {
     for i in 0.. {
-        if au8.compare_exchange_weak(
-            cmp,
-            swp,
-            Ordering::Acquire,
-            Ordering::Relaxed
-        ).is_ok() {
+        if au8
+            .compare_exchange_weak(cmp, swp, Ordering::Acquire, Ordering::Relaxed)
+            .is_ok()
+        {
             return;
         }
         match i {
@@ -111,51 +100,60 @@ fn deref_sync<'a>(mmap: &'a MmapMut) -> &'a AtomicU8 {
 
 fn try_deref<'a>(mmap: &MmapMut) -> DerefResult<&'a mut Shm> {
     let addr = mmap.as_ptr() as usize;
-    let len  = mmap.deref().len();
-    let align = align_of::<Shm>();  
+    let len = mmap.deref().len();
+    let align = align_of::<Shm>();
 
     if addr % align != 0 {
-        return Err(DerefError::AlignmentError { address: addr, alignment: align });
+        return Err(DerefError::AlignmentError {
+            address: addr,
+            alignment: align,
+        });
     }
     if len != size_of::<Shm>() {
-        return Err(DerefError::SizeMismatch { expected: size_of::<Shm>(), actual: len });
+        return Err(DerefError::SizeMismatch {
+            expected: size_of::<Shm>(),
+            actual: len,
+        });
     }
 
     let discriminant = mmap.deref()[std::mem::offset_of!(Shm, stage)];
-    if !(0..2).contains(&discriminant) { // TODO make this more enum agnostic
+    if !(0..2).contains(&discriminant) {
+        // TODO make this more enum agnostic
         return Err(DerefError::InvalidDiscriminant(discriminant));
     }
 
-    Ok(unsafe {
-        &mut *(mmap.as_ptr() as *mut Shm)
-    })
+    Ok(unsafe { &mut *(mmap.as_ptr() as *mut Shm) })
 }
 
 pub struct BotChannel {
-    bkgfd:      tempfile::NamedTempFile,
-    mmap:       MmapMut,
+    bkgfd: tempfile::NamedTempFile,
+    mmap: MmapMut,
 }
 
 impl BotChannel {
-    pub fn new() -> Self {
-        let tf = tempfile::NamedTempFile::new().unwrap();
-        tf.as_file().set_len(std::mem::size_of::<Shm>() as u64).unwrap();
-        let mmap = unsafe { MmapMut::map_mut(tf.as_file()).unwrap() };
-        let ret = Self {
-            bkgfd: tf,
-            mmap
+    pub fn new() -> anyhow::Result<Self> {
+        let tf = tempfile::NamedTempFile::new()
+            .with_context(|| "unable to create backing file for bot channel")?;
+        tf.as_file()
+            .set_len(std::mem::size_of::<Shm>() as u64)
+            .with_context(|| "unable to set backing file length")?;
+        let mmap = unsafe {
+            MmapMut::map_mut(tf.as_file()).with_context(|| "unable to memory map backing file")?
         };
+        let ret = Self { bkgfd: tf, mmap };
         deref_sync(&ret.mmap).store(ENGINE_BUSY, Ordering::Release);
-        return ret;
+        Ok(ret)
     }
-    
+
     pub fn backing_file_path<'a>(&'a self) -> &'a Path {
         self.bkgfd.path()
     }
 
     pub async fn lock(&self) -> DerefResult<LockedStage<ENGINE_READY>> {
         cas_poll(deref_sync(&self.mmap), ENGINE_READY, ENGINE_BUSY).await;
-        Ok(LockedStage { inner: try_deref(&self.mmap)? })
+        Ok(LockedStage {
+            inner: try_deref(&self.mmap)?,
+        })
     }
 }
 
@@ -166,30 +164,26 @@ impl Drop for BotChannel {
 }
 
 pub struct EngineChannel {
-    mmap: MmapMut
+    mmap: MmapMut,
 }
 
 impl EngineChannel {
-    pub fn from_path<P: AsRef<Path>>(path: P) -> Self {
+    pub fn from_path<P: AsRef<Path>>(path: P) -> anyhow::Result<Self> {
         let file = OpenOptions::new()
             .read(true)
             .write(true)
             .open(path)
-            .unwrap();
+            .with_context(|| "unable to open backing file for engine channel")?;
 
-        Self {
-            mmap: unsafe { MmapMut::map_mut(&file).unwrap() }
-        }
+        Ok(Self {
+            mmap: unsafe { MmapMut::map_mut(&file).with_context(|| "unable to memory map backing file")? },
+        })
     }
 
-    fn shm<'a>(&'a self) -> &'a mut Shm { // TODO worry about validation
-        unsafe {
-            &mut *(self.mmap.as_ptr() as *mut Shm)
-        }
-    }
-
-    pub async fn lock(&self) -> LockedStage<ENGINE_BUSY> {
-        cas_poll(&self.shm().sync, ENGINE_BUSY, ENGINE_READY).await;
-        LockedStage { inner: self.shm() }
+    pub async fn lock(&self) -> DerefResult<LockedStage<ENGINE_BUSY>> {
+        cas_poll(deref_sync(&self.mmap), ENGINE_BUSY, ENGINE_READY).await;
+        Ok(LockedStage {
+            inner: try_deref(&self.mmap)?,
+        })
     }
 }

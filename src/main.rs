@@ -32,14 +32,14 @@ async fn run() -> Result<()> {
     let on_tick = |_, state: &GameState| {
         if state.ball_pos.1 > state.p0_pos {
             1.0
-         else {
+        } else {
             -1.0
         }
     };
 
     println!("{}", serde_json::to_string(&conf)?);
 
-    let p1 = BotChannel::new();
+    let p1 = BotChannel::new()?;
 
     let _ = Command::new("./target/debug/bot")
         .arg(p1.backing_file_path())
@@ -48,12 +48,12 @@ async fn run() -> Result<()> {
 
     let start = Instant::now();
 
-    *p1.lock().await = ShmStage::Init {
+    *p1.lock().await.with_context(|| "failure during initialization broadcast")? = ShmStage::Init {
         config: conf.clone(),
         action: 0.0,
     };
 
-    let mut stage = p1.lock().await;
+    let mut stage = p1.lock().await.with_context(|| "failure during initialization reciept")?;
 
     let ShmStage::Init { config: _, action } = *stage else {
         panic!();
@@ -82,7 +82,8 @@ async fn run() -> Result<()> {
     {
         let mut stage = timeout(BOT_TIMEOUT, p1.lock())
                             .await
-                            .with_context(|| "bot timed out")?;
+                            .with_context(|| "bot timed out")?
+                            .with_context(|| "invalid bot response")?;
 
         let ShmStage::Tick {
             state: ref mut shm_state,
