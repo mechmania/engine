@@ -1,10 +1,14 @@
-use std::sync::atomic::{ AtomicU8, Ordering };
-use std::path::Path;
-use std::fs::OpenOptions;
-use std::time::{ Duration, SystemTime };
-use std::ops::{ Deref, DerefMut, Drop };
-use std::hint;
+use std::{
+    sync::atomic::{ AtomicU8, Ordering },
+    path::Path,
+    fs::OpenOptions,
+    time::Duration,
+    ops::{ Deref, DerefMut, Drop },
+    mem::offset_of,
+    hint,
+};
 use memmap::MmapMut;
+use thiserror::Error;
 use crate::game::{
     GameState, 
     GameConfig,
@@ -20,13 +24,16 @@ pub const TELEMETRY_SZ:  usize = 1024;
 pub const TELEMETRY_OLD: u8 = 0;
 pub const TELEMETRY_NEW: u8 = 1;
 
-#[derive(Debug)]
+#[derive(Error, Debug)]
 pub enum DerefError {
+    #[error("memory misaligned at 0x{address:x}, expecting alignment of 0x{alignment:x}")]
     AlignmentError {
         address: usize,
         alignment: usize,
     },
+    #[error("invalid enum discriminant {0}")]
     InvalidDiscriminant(u8),
+    #[error("size mismatch (expected {expected}, actual {actual})")]
     SizeMismatch {
         expected: usize,
         actual:   usize,
@@ -97,10 +104,16 @@ async fn cas_poll(au8: &AtomicU8, cmp: u8, swp: u8) {
     }
 }
 
+// safe because we only grab one byte
+fn deref_sync<'a>(mmap: &'a MmapMut) -> &'a AtomicU8 {
+    unsafe { &*(mmap.as_ptr().add(offset_of!(Shm, sync)) as *const AtomicU8) }
+}
+
 fn try_deref<'a>(mmap: &MmapMut) -> DerefResult<&'a mut Shm> {
     let addr = mmap.as_ptr() as usize;
     let len  = mmap.deref().len();
     let align = align_of::<Shm>();  
+
     if addr % align != 0 {
         return Err(DerefError::AlignmentError { address: addr, alignment: align });
     }
@@ -108,15 +121,8 @@ fn try_deref<'a>(mmap: &MmapMut) -> DerefResult<&'a mut Shm> {
         return Err(DerefError::SizeMismatch { expected: size_of::<Shm>(), actual: len });
     }
 
-    if (mmap.as_ptr() as usize) % align_of::<Shm>() != 0 {
-        return Err(DerefError::AlignmentError {
-            address:    mmap.as_ptr() as usize,
-            alignment:  align_of::<Shm>()
-        })
-    }
-
     let discriminant = mmap.deref()[std::mem::offset_of!(Shm, stage)];
-    if (0..2).contains(&discriminant) { // TODO make this more enum agnostic
+    if !(0..2).contains(&discriminant) { // TODO make this more enum agnostic
         return Err(DerefError::InvalidDiscriminant(discriminant));
     }
 
@@ -139,7 +145,7 @@ impl BotChannel {
             bkgfd: tf,
             mmap
         };
-        try_deref(&ret.mmap).unwrap().sync.store(ENGINE_BUSY, Ordering::Release);
+        deref_sync(&ret.mmap).store(ENGINE_BUSY, Ordering::Release);
         return ret;
     }
     
@@ -148,14 +154,14 @@ impl BotChannel {
     }
 
     pub async fn lock(&self) -> DerefResult<LockedStage<ENGINE_READY>> {
-        cas_poll(&self.shm().sync, ENGINE_READY, ENGINE_BUSY).await;
+        cas_poll(deref_sync(&self.mmap), ENGINE_READY, ENGINE_BUSY).await;
         Ok(LockedStage { inner: try_deref(&self.mmap)? })
     }
 }
 
 impl Drop for BotChannel {
     fn drop(&mut self) {
-        self.shm().sync.store(ENGINE_FINISHED, Ordering::Release);
+        deref_sync(&self.mmap).store(ENGINE_FINISHED, Ordering::Release);
     }
 }
 
