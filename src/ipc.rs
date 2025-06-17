@@ -1,25 +1,101 @@
 use anyhow::Context;
+use paste::paste;
 use memmap::MmapMut;
 use std::{
     fs::OpenOptions,
     hint,
     mem::offset_of,
-    ops::{Deref, DerefMut, Drop},
+    ops::Drop,
     path::Path,
     sync::atomic::{AtomicU8, Ordering},
     time::Duration,
 };
 use thiserror::Error;
 
-use crate::game::{GameConfig, GameState, InitAction, TickAction};
+use crate::game::{GameConfig, GameState, InitPosition, PaddleVelocity};
 
-pub const ENGINE_READY: u8 = 0;
-pub const ENGINE_BUSY: u8 = 1;
-pub const ENGINE_FINISHED: u8 = 2;
+#[repr(u8)]
+pub enum EngineStatus {
+    Ready    = 0,
+    Busy     = 1,
+    Finished = 2,
+}
 
 pub const TELEMETRY_SZ: usize = 1024;
 pub const TELEMETRY_OLD: u8 = 0;
 pub const TELEMETRY_NEW: u8 = 1;
+
+macro_rules! define_protocols {
+    (
+        $(
+            $name:ident: ($msg:ty, $resp:ty)
+        ),* $(,)?
+    ) => {
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        #[repr(u8)]
+        pub enum ProtocolId {
+            $(
+                $name,
+            )*
+        }
+
+        pub trait Protocol {
+            const ID: ProtocolId;
+            type Msg;
+            type Response;
+        }
+        paste! {
+            $(
+                pub struct [<$name Protocol>];
+
+                impl Protocol for [<$name Protocol>] {
+                    const ID: ProtocolId = ProtocolId::$name;
+                    type Msg = $msg;
+                    type Response = $resp;
+                }
+            )*
+            pub enum ProtocolUnion {
+                $(
+                    [<$name Msg>]($msg),
+                    [<$name Response>]($resp),
+                )*
+            }
+            impl ProtocolUnion {
+                pub fn get_id(&self) -> ProtocolId {
+                    match self {
+                        $(
+                            Self::[<$name Msg>](_) => ProtocolId::$name,
+                            Self::[<$name Response>](_) => ProtocolId::$name,
+                        )*
+                    }
+                }
+
+                pub fn is_message(&self) -> bool {
+                    match self {
+                        $(
+                            Self::[<$name Msg>](_) => true,
+                            Self::[<$name Response>](_) => false,
+                        )*
+                    }
+                }
+
+                pub fn is_response(&self) -> bool {
+                    match self {
+                        $(
+                            Self::[<$name Msg>](_) => false,
+                            Self::[<$name Response>](_) => true,
+                        )*
+                    }
+                }
+            }
+        }
+    };
+}
+
+define_protocols! {
+    Init: (GameConfig, InitPosition),
+    Tick: (GameState, PaddleVelocity)
+}
 
 #[derive(Error, Debug)]
 pub enum DerefError {
@@ -33,46 +109,10 @@ pub enum DerefError {
 
 pub type DerefResult<T> = Result<T, DerefError>;
 
-#[repr(C, u8)]
-pub enum ShmStage {
-    Init {
-        config: GameConfig,
-        action: InitAction,
-    },
-    Tick {
-        state: GameState,
-        action: TickAction,
-    },
-}
-
-#[repr(transparent)]
-pub struct LockedStage<'a, const R: u8> {
-    inner: &'a mut Shm,
-}
-
-impl<'a, const R: u8> Deref for LockedStage<'a, R> {
-    type Target = ShmStage;
-    fn deref(&self) -> &Self::Target {
-        &self.inner.stage
-    }
-}
-
-impl<'a, const R: u8> DerefMut for LockedStage<'a, R> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.inner.stage
-    }
-}
-
-impl<const R: u8> Drop for LockedStage<'_, R> {
-    fn drop(&mut self) {
-        self.inner.sync.store(R, Ordering::Release);
-    }
-}
-
 #[repr(C)]
 struct Shm {
-    stage: ShmStage,
     sync: AtomicU8,
+    union: ProtocolUnion,
     msg: [u8; TELEMETRY_SZ - 1],
     msg_sync: AtomicU8,
 }
@@ -141,7 +181,7 @@ impl BotChannel {
             MmapMut::map_mut(tf.as_file()).with_context(|| "unable to memory map backing file")?
         };
         let ret = Self { bkgfd: tf, mmap };
-        deref_sync(&ret.mmap).store(ENGINE_BUSY, Ordering::Release);
+        deref_sync(&ret.mmap).store(EngineStatus::Busy as u8, Ordering::Release);
         Ok(ret)
     }
 
@@ -149,8 +189,10 @@ impl BotChannel {
         self.bkgfd.path()
     }
 
+    pub async fn msg(&self) -> MsgResult<
+
     pub async fn lock(&self) -> DerefResult<LockedStage<ENGINE_READY>> {
-        cas_poll(deref_sync(&self.mmap), ENGINE_READY, ENGINE_BUSY).await;
+        cas_poll(deref_sync(&self.mmap), EngineStatus::Ready as u8, EngineStatus::Busy as u8).await;
         Ok(LockedStage {
             inner: try_deref(&self.mmap)?,
         })
