@@ -1,6 +1,6 @@
 use anyhow::Context;
 use memmap::MmapMut;
-use paste::paste;
+use pastey::paste;
 use std::{
     fs::OpenOptions,
     hint,
@@ -12,6 +12,7 @@ use std::{
 };
 use thiserror::Error;
 use tokio::time::timeout;
+use tokio::time::error::Elapsed;
 
 use crate::game::{GameConfig, GameState, InitPosition, PaddleVelocity};
 
@@ -20,11 +21,6 @@ pub enum EngineStatus {
     Ready = 0,
     Busy = 1,
     Finished = 2,
-}
-
-macro_rules! count {
-    () => (0usize);
-    ($head:tt $($tail:tt)*) => (1usize + count!($($tail)*));
 }
 
 macro_rules! define_protocols {
@@ -41,8 +37,6 @@ macro_rules! define_protocols {
             )*
         }
 
-        pub const PROTOCOL_COUNT: usize = count!($($name)*);
-
         pub trait Protocol {
             const ID: ProtocolId;
             const TIMEOUT: Duration;
@@ -50,7 +44,16 @@ macro_rules! define_protocols {
             type Response;
             fn msg_into_enum(msg: Self::Msg) -> ProtocolUnion;
             fn response_into_enum(response: Self::Response) -> ProtocolUnion;
+            fn enum_into_msg(variant: ProtocolUnion) -> Self::Msg;
+            fn enum_into_response(variant: ProtocolUnion) -> Self::Response;
+            fn msg_discriminant() -> u8 {
+                return Self::ID as u8 * 2;
+            }
+            fn response_discriminant() -> u8 {
+                return Self::ID as u8 * 2 + 1;
+            }
         }
+
         paste! {
             $(
                 pub struct [<$name Protocol>];
@@ -66,39 +69,43 @@ macro_rules! define_protocols {
                     fn response_into_enum(response: Self::Response) -> ProtocolUnion {
                         ProtocolUnion::[<$name Response>](response)
                     }
+                    fn enum_into_msg(variant: ProtocolUnion) -> Self::Msg {
+                        if let ProtocolUnion::[<$name Msg>](ret) = variant {
+                            ret
+                        } else {
+                            panic!()
+                        }
+                    }
+                    fn enum_into_response(variant: ProtocolUnion) -> Self::Response {
+                        if let ProtocolUnion::[<$name Response>](ret) = variant {
+                            ret
+                        } else {
+                            panic!()
+                        }
+                    }
                 }
             )*
+            #[derive(Clone)]
             pub enum ProtocolUnion {
                 $(
                     [<$name Msg>]($msg),
                     [<$name Response>]($resp),
                 )*
             }
-            impl ProtocolUnion {
-                pub fn get_id(&self) -> ProtocolId {
-                    match self {
-                        $(
-                            Self::[<$name Msg>](_) => ProtocolId::$name,
-                            Self::[<$name Response>](_) => ProtocolId::$name,
-                        )*
-                    }
-                }
 
-                pub fn is_message(&self) -> bool {
-                    match self {
+            pub struct Strategy {
+                $(
+                    pub [<on_ $name:lower>]: Box<dyn Fn(&$msg) -> $resp>,
+                )*
+            }
+            
+            impl Strategy {
+                pub fn handle_msg(&self, msg: &ProtocolUnion) -> ProtocolUnion {
+                    match msg {
                         $(
-                            Self::[<$name Msg>](_) => true,
-                            Self::[<$name Response>](_) => false,
+                            ProtocolUnion::[<$name Msg>]([<$msg:lower>]) => ProtocolUnion::[<$name Response>]((self.[<on_ $name:lower>])([<$msg:lower>])),
                         )*
-                    }
-                }
-
-                pub fn is_response(&self) -> bool {
-                    match self {
-                        $(
-                            Self::[<$name Msg>](_) => false,
-                            Self::[<$name Response>](_) => true,
-                        )*
+                        _ => panic!("engine sent invalid message")
                     }
                 }
             }
@@ -116,10 +123,12 @@ define_protocols! {
 pub enum ResponseError {
     #[error("memory misaligned at 0x{address:x}, expecting alignment of 0x{alignment:x}")]
     AlignmentError { address: usize, alignment: usize } = 0,
-    #[error("invalid enum discriminant {0}")]
-    InvalidDiscriminant(u8) = 1,
+    #[error("malformed response")]
+    Malformed = 1,
     #[error("size mismatch (expected {expected}, actual {actual})")]
     SizeMismatch { expected: usize, actual: usize } = 2,
+    #[error("response timed out after")]
+    Timeout(#[from] Elapsed) = 3,
 }
 
 pub type ResponseResult<T> = Result<T, ResponseError>;
@@ -130,12 +139,9 @@ struct Shm {
     union: ProtocolUnion,
 }
 
-async fn cas_poll(au8: &AtomicU8, cmp: u8, swp: u8) {
+async fn poll(au8: &AtomicU8, cmp: u8) {
     for i in 0.. {
-        if au8
-            .compare_exchange_weak(cmp, swp, Ordering::Acquire, Ordering::Relaxed)
-            .is_ok()
-        {
+        if au8.load(Ordering::Acquire) == cmp {
             return;
         }
         match i {
@@ -151,33 +157,6 @@ async fn cas_poll(au8: &AtomicU8, cmp: u8, swp: u8) {
 fn deref_sync<'a>(mmap: &'a [u8]) -> &'a AtomicU8 {
     unsafe { &*(mmap.as_ptr().add(offset_of!(Shm, sync)) as *const AtomicU8) }
 }
-
-//fn try_deref<'a>(mmap: &'a [u8]) -> ResponseResult<&'a mut Shm> {
-//    let addr = mmap.as_ptr() as usize;
-//    let len = mmap.deref().len();
-//    let align = align_of::<Shm>();
-//
-//    if addr % align != 0 {
-//        return Err(ResponseError::AlignmentError {
-//            address: addr,
-//            alignment: align,
-//        });
-//    }
-//    if len != size_of::<Shm>() {
-//        return Err(ResponseError::SizeMismatch {
-//            expected: size_of::<Shm>(),
-//            actual: len,
-//        });
-//    }
-//
-//    let discriminant = mmap.deref()[std::mem::offset_of!(Shm, stage)];
-//    if !(0..2).contains(&discriminant) {
-//        // TODO make this more enum agnostic
-//        return Err(ResponseError::InvalidDiscriminant(discriminant));
-//    }
-//
-//    Ok(unsafe { &mut *(mmap.as_ptr() as *mut Shm) })
-//}
 
 pub struct BotChannel {
     bkgfd: tempfile::NamedTempFile,
@@ -219,13 +198,38 @@ impl BotChannel {
 
         sync.store(EngineStatus::Ready as u8, Ordering::Release);
 
-        let response = timeout(T::TIMEOUT, cas_poll(
+        timeout(T::TIMEOUT, poll(
             sync, 
-            EngineStatus::Busy as u8,
-            EngineStatus::Ready as u8
-        )).await;
+            EngineStatus::Busy as u8
+        )).await.map_err(|e| {
+            sync.store(EngineStatus::Busy as u8, Ordering::Release);
+            e
+        })?;
 
-        todo!()
+        let addr = ptr as usize;
+        let len = self.mmap.len();
+        let align = align_of::<Shm>();
+
+        if len != size_of::<Shm>() {
+            return Err(ResponseError::SizeMismatch {
+                expected: size_of::<Shm>(),
+                actual: len,
+            });
+        }
+        if addr % align != 0 {
+            return Err(ResponseError::AlignmentError {
+                address: addr,
+                alignment: align,
+            });
+        }
+
+        let discriminant = self.mmap[offset_of!(Shm, union)];
+        if discriminant != T::response_discriminant() {
+            return Err(ResponseError::Malformed);
+        }
+
+        let union = unsafe { &*(ptr.add(offset_of!(Shm, union)) as *const ProtocolUnion) };
+        Ok(T::enum_into_response(union.clone()))
     }
 }
 
@@ -254,11 +258,19 @@ impl EngineChannel {
         })
     }
 
-    pub async fn lock(&self) -> ResponseResult<LockedStage<ENGINE_BUSY>> {
-        cas_poll(deref_sync(&self.mmap), ENGINE_BUSY, ENGINE_READY).await;
-        Ok(LockedStage {
-            inner: try_deref(&self.mmap)?,
-        })
+    pub async fn handle_msg(&self, strategy: &Strategy) {
+        let sync = deref_sync(&self.mmap);
+        poll( // TODO handle engine finish
+            sync, 
+            EngineStatus::Ready as u8
+        ).await;
+
+        // safe to deref because engine is trusted
+        let msg = unsafe { &mut* (self.mmap.as_ptr().add(offset_of!(Shm, union)) as *mut ProtocolUnion) };
+        let response = strategy.handle_msg(msg);
+        *msg = response;
+
+        sync.store(EngineStatus::Busy as u8, Ordering::Release);
     }
 }
 
