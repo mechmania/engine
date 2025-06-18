@@ -1,6 +1,6 @@
 use serde::{Serialize, Deserialize};
 
-#[derive(Serialize, Deserialize, Clone, Copy)]
+#[derive(Serialize, Deserialize, Clone)]
 #[repr(C)]
 pub struct GameConfig {
     pub height:         u32,
@@ -13,7 +13,7 @@ pub struct GameConfig {
     pub max_ticks:      u32,
 }
 
-#[derive(Serialize, Deserialize, Clone, Copy)]
+#[derive(Serialize, Deserialize, Clone)]
 #[repr(C)]
 pub struct GameState {
     pub p0_pos:     f64,

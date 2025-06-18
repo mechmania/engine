@@ -1,6 +1,6 @@
 use anyhow::Context;
-use paste::paste;
 use memmap::MmapMut;
+use paste::paste;
 use std::{
     fs::OpenOptions,
     hint,
@@ -11,24 +11,26 @@ use std::{
     time::Duration,
 };
 use thiserror::Error;
+use tokio::time::timeout;
 
 use crate::game::{GameConfig, GameState, InitPosition, PaddleVelocity};
 
 #[repr(u8)]
 pub enum EngineStatus {
-    Ready    = 0,
-    Busy     = 1,
+    Ready = 0,
+    Busy = 1,
     Finished = 2,
 }
 
-pub const TELEMETRY_SZ: usize = 1024;
-pub const TELEMETRY_OLD: u8 = 0;
-pub const TELEMETRY_NEW: u8 = 1;
+macro_rules! count {
+    () => (0usize);
+    ($head:tt $($tail:tt)*) => (1usize + count!($($tail)*));
+}
 
 macro_rules! define_protocols {
     (
         $(
-            $name:ident: ($msg:ty, $resp:ty)
+            $name:ident: ($msg:ty, $resp:ty, $timeout:expr)
         ),* $(,)?
     ) => {
         #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -39,19 +41,31 @@ macro_rules! define_protocols {
             )*
         }
 
+        pub const PROTOCOL_COUNT: usize = count!($($name)*);
+
         pub trait Protocol {
             const ID: ProtocolId;
+            const TIMEOUT: Duration;
             type Msg;
             type Response;
+            fn msg_into_enum(msg: Self::Msg) -> ProtocolUnion;
+            fn response_into_enum(response: Self::Response) -> ProtocolUnion;
         }
         paste! {
             $(
                 pub struct [<$name Protocol>];
 
                 impl Protocol for [<$name Protocol>] {
-                    const ID: ProtocolId = ProtocolId::$name;
+                    const ID: ProtocolId    = ProtocolId::$name;
+                    const TIMEOUT: Duration = $timeout;
                     type Msg = $msg;
                     type Response = $resp;
+                    fn msg_into_enum(msg: Self::Msg) -> ProtocolUnion {
+                        ProtocolUnion::[<$name Msg>](msg)
+                    }
+                    fn response_into_enum(response: Self::Response) -> ProtocolUnion {
+                        ProtocolUnion::[<$name Response>](response)
+                    }
                 }
             )*
             pub enum ProtocolUnion {
@@ -93,28 +107,27 @@ macro_rules! define_protocols {
 }
 
 define_protocols! {
-    Init: (GameConfig, InitPosition),
-    Tick: (GameState, PaddleVelocity)
+    Init: (GameConfig, InitPosition, Duration::from_millis(1000)),
+    Tick: (GameState, PaddleVelocity, Duration::from_millis(20))
 }
 
 #[derive(Error, Debug)]
-pub enum DerefError {
+#[repr(C, u8)]
+pub enum ResponseError {
     #[error("memory misaligned at 0x{address:x}, expecting alignment of 0x{alignment:x}")]
-    AlignmentError { address: usize, alignment: usize },
+    AlignmentError { address: usize, alignment: usize } = 0,
     #[error("invalid enum discriminant {0}")]
-    InvalidDiscriminant(u8),
+    InvalidDiscriminant(u8) = 1,
     #[error("size mismatch (expected {expected}, actual {actual})")]
-    SizeMismatch { expected: usize, actual: usize },
+    SizeMismatch { expected: usize, actual: usize } = 2,
 }
 
-pub type DerefResult<T> = Result<T, DerefError>;
+pub type ResponseResult<T> = Result<T, ResponseError>;
 
 #[repr(C)]
 struct Shm {
     sync: AtomicU8,
     union: ProtocolUnion,
-    msg: [u8; TELEMETRY_SZ - 1],
-    msg_sync: AtomicU8,
 }
 
 async fn cas_poll(au8: &AtomicU8, cmp: u8, swp: u8) {
@@ -134,36 +147,37 @@ async fn cas_poll(au8: &AtomicU8, cmp: u8, swp: u8) {
 }
 
 // safe because we only grab one byte
-fn deref_sync<'a>(mmap: &'a MmapMut) -> &'a AtomicU8 {
+#[inline]
+fn deref_sync<'a>(mmap: &'a [u8]) -> &'a AtomicU8 {
     unsafe { &*(mmap.as_ptr().add(offset_of!(Shm, sync)) as *const AtomicU8) }
 }
 
-fn try_deref<'a>(mmap: &MmapMut) -> DerefResult<&'a mut Shm> {
-    let addr = mmap.as_ptr() as usize;
-    let len = mmap.deref().len();
-    let align = align_of::<Shm>();
-
-    if addr % align != 0 {
-        return Err(DerefError::AlignmentError {
-            address: addr,
-            alignment: align,
-        });
-    }
-    if len != size_of::<Shm>() {
-        return Err(DerefError::SizeMismatch {
-            expected: size_of::<Shm>(),
-            actual: len,
-        });
-    }
-
-    let discriminant = mmap.deref()[std::mem::offset_of!(Shm, stage)];
-    if !(0..2).contains(&discriminant) {
-        // TODO make this more enum agnostic
-        return Err(DerefError::InvalidDiscriminant(discriminant));
-    }
-
-    Ok(unsafe { &mut *(mmap.as_ptr() as *mut Shm) })
-}
+//fn try_deref<'a>(mmap: &'a [u8]) -> ResponseResult<&'a mut Shm> {
+//    let addr = mmap.as_ptr() as usize;
+//    let len = mmap.deref().len();
+//    let align = align_of::<Shm>();
+//
+//    if addr % align != 0 {
+//        return Err(ResponseError::AlignmentError {
+//            address: addr,
+//            alignment: align,
+//        });
+//    }
+//    if len != size_of::<Shm>() {
+//        return Err(ResponseError::SizeMismatch {
+//            expected: size_of::<Shm>(),
+//            actual: len,
+//        });
+//    }
+//
+//    let discriminant = mmap.deref()[std::mem::offset_of!(Shm, stage)];
+//    if !(0..2).contains(&discriminant) {
+//        // TODO make this more enum agnostic
+//        return Err(ResponseError::InvalidDiscriminant(discriminant));
+//    }
+//
+//    Ok(unsafe { &mut *(mmap.as_ptr() as *mut Shm) })
+//}
 
 pub struct BotChannel {
     bkgfd: tempfile::NamedTempFile,
@@ -189,19 +203,35 @@ impl BotChannel {
         self.bkgfd.path()
     }
 
-    pub async fn msg(&self) -> MsgResult<
+    pub async fn msg<T: Protocol>(&self, msg: T::Msg) -> ResponseResult<T::Response> {
+        let ptr = self.mmap.as_ptr();
+        let sync = deref_sync(&self.mmap);
 
-    pub async fn lock(&self) -> DerefResult<LockedStage<ENGINE_READY>> {
-        cas_poll(deref_sync(&self.mmap), EngineStatus::Ready as u8, EngineStatus::Busy as u8).await;
-        Ok(LockedStage {
-            inner: try_deref(&self.mmap)?,
-        })
+        assert_eq!(sync.load(Ordering::Acquire), EngineStatus::Busy as u8);
+
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                &T::msg_into_enum(msg) as *const ProtocolUnion,
+                ptr.add(offset_of!(Shm, union)) as *mut ProtocolUnion,
+                1
+            )
+        }
+
+        sync.store(EngineStatus::Ready as u8, Ordering::Release);
+
+        let response = timeout(T::TIMEOUT, cas_poll(
+            sync, 
+            EngineStatus::Busy as u8,
+            EngineStatus::Ready as u8
+        )).await;
+
+        todo!()
     }
 }
 
 impl Drop for BotChannel {
     fn drop(&mut self) {
-        deref_sync(&self.mmap).store(ENGINE_FINISHED, Ordering::Release);
+        deref_sync(&self.mmap).store(EngineStatus::Finished as u8, Ordering::Release);
     }
 }
 
@@ -218,14 +248,17 @@ impl EngineChannel {
             .with_context(|| "unable to open backing file for engine channel")?;
 
         Ok(Self {
-            mmap: unsafe { MmapMut::map_mut(&file).with_context(|| "unable to memory map backing file")? },
+            mmap: unsafe {
+                MmapMut::map_mut(&file).with_context(|| "unable to memory map backing file")?
+            },
         })
     }
 
-    pub async fn lock(&self) -> DerefResult<LockedStage<ENGINE_BUSY>> {
+    pub async fn lock(&self) -> ResponseResult<LockedStage<ENGINE_BUSY>> {
         cas_poll(deref_sync(&self.mmap), ENGINE_BUSY, ENGINE_READY).await;
         Ok(LockedStage {
             inner: try_deref(&self.mmap)?,
         })
     }
 }
+
