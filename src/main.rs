@@ -2,9 +2,36 @@ use game_runner::{
     game::{run_tick, GameConfig, GameState},
     ipc::*,
 };
+use tokio::join;
+use clap::Parser;
 use anyhow::{ Context, Result };
-use std::process::Command;
+use std::{path::PathBuf, process::Command};
 use std::time::Instant;
+
+#[derive(Parser)]
+#[command(version, about, long_about = None)]
+struct Cli {
+    /// path to bot a binary
+    bot_a: PathBuf,
+    /// path to bot b binary
+    bot_b: PathBuf,
+
+    /// output stdout from bot A
+    #[arg(short = 'a')]
+    output_bot_a: bool,
+
+    /// output stdout from bot B
+    #[arg(short = 'b')]
+    output_bot_b: bool,
+
+    /// output game log (by default this is set when none of -abg are passed)
+    #[arg(short = 'g')]
+    output_gamelog: bool,
+
+    /// when specified, output will be written to this file
+    #[arg(short, long)]
+    output: Option<PathBuf>
+}
 
 #[tokio::main]
 async fn main() {
@@ -14,6 +41,13 @@ async fn main() {
 }
 
 async fn run() -> Result<()> {
+    let mut cli = Cli::parse();
+    if !cli.output_bot_a && !cli.output_bot_b && !cli.output_gamelog {
+        cli.output_gamelog = true;
+    }
+    let cli = cli;
+
+
     let conf = GameConfig {
         height: 400,
         width: 800,
@@ -25,31 +59,31 @@ async fn run() -> Result<()> {
         max_ticks: 50000,
     };
 
-    let on_init = |_| 0.0;
-    let on_tick = |_, state: &GameState| {
-        if state.ball_pos.1 > state.p0_pos {
-            1.0
-        } else {
-            -1.0
-        }
-    };
-
     println!("{}", serde_json::to_string(&conf)?);
 
-    let p1 = BotChannel::new()?;
+    let channel_a = BotChannel::new()?;
+    let channel_b = BotChannel::new()?;
 
-    let p1_init_pos = p1.msg::<InitProtocol>(conf.clone());
-
-    let _ = Command::new("./target/debug/bot")
-        .arg(p1.backing_file_path())
+    let proc_a = Command::new(cli.bot_a)
+        .arg(channel_a.backing_file_path())
         .spawn()
-        .with_context(|| "failed to launch bot")?;
+        .with_context(|| "failed to launch bot A")?;
+
+    let proc_b = Command::new(cli.bot_b)
+        .arg(channel_b.backing_file_path())
+        .spawn()
+        .with_context(|| "failed to launch bot B")?;
 
     let start = Instant::now();
 
+    let (p0_init_pos, p1_init_pos) = join!(
+         async { channel_a.msg::<InitProtocol>(&conf).await.unwrap_or(0.0) },
+         async { channel_b.msg::<InitProtocol>(&conf).await.unwrap_or(0.0) },
+    );
+
     let mut state = GameState {
-        p0_pos: on_init(&conf),
-        p1_pos: p1_init_pos.await.unwrap_or(0.0),
+        p0_pos: p0_init_pos,
+        p1_pos: p1_init_pos,
         p0_score: 0,
         p1_score: 0,
         ball_pos: (0.0, 0.0),
@@ -61,11 +95,29 @@ async fn run() -> Result<()> {
         && state.p0_score < conf.winning_score
         && state.p1_score < conf.winning_score
     {
-        let p1_vel = p1.msg::<TickProtocol>(state.clone());
 
-        let p0 = on_tick(&conf, &state);
-        run_tick(&mut state, &conf, p0, p1_vel.await.unwrap());
-        //run_tick(&mut state, &conf, p0, p1_vel.await.unwrap());
+        let (p0_vel, p1_vel) = join!(
+            async {
+                channel_a.msg::<TickProtocol>(&state)
+                    .await
+                    .map_err(|e| {
+                        println!("### Unable to process response from bot A: {e}");
+                        e
+                    })
+                    .unwrap_or(0.0)
+            },
+            async {
+                channel_b.msg::<TickProtocol>(&state)
+                    .await
+                    .map_err(|e| {
+                        println!("### Unable to process response from bot B: {e}");
+                        e
+                    })
+                    .unwrap_or(0.0)
+            }
+        );
+
+        run_tick(&mut state, &conf, p0_vel, p1_vel);
 
         println!("{}", serde_json::to_string(&state).expect("parse err"));
     }

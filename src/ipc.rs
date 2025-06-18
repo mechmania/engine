@@ -182,7 +182,9 @@ impl BotChannel {
         self.bkgfd.path()
     }
 
-    pub async fn msg<T: Protocol>(&self, msg: T::Msg) -> ResponseResult<T::Response> {
+    pub async fn msg<T: Protocol>(&self, msg: &T::Msg) -> ResponseResult<T::Response> 
+        where <T as Protocol>::Msg : Clone 
+    {
         let ptr = self.mmap.as_ptr();
         let sync = deref_sync(&self.mmap);
 
@@ -190,7 +192,7 @@ impl BotChannel {
 
         unsafe {
             std::ptr::copy_nonoverlapping(
-                &T::msg_into_enum(msg) as *const ProtocolUnion,
+                &T::msg_into_enum(msg.clone()) as *const ProtocolUnion,
                 ptr.add(offset_of!(Shm, union)) as *mut ProtocolUnion,
                 1
             )
