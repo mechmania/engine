@@ -1,37 +1,22 @@
 use game_runner::{
     game::{run_tick, GameConfig, GameState},
     ipc::*,
+    cli::*,
 };
-use tokio::join;
-use clap::Parser;
+use tokio::{
+    sync::mpsc,
+    process::Command,
+    join,
+    io::{BufReader, AsyncBufReadExt},
+};
 use anyhow::{ Context, Result };
-use std::{path::PathBuf, process::Command};
-use std::time::Instant;
+use std::{
+    path::{ PathBuf, Path }, 
+    fs::File,
+    time::Instant,
+    process::Stdio,
+};
 
-#[derive(Parser)]
-#[command(version, about, long_about = None)]
-struct Cli {
-    /// path to bot a binary
-    bot_a: PathBuf,
-    /// path to bot b binary
-    bot_b: PathBuf,
-
-    /// output stdout from bot A
-    #[arg(short = 'a')]
-    output_bot_a: bool,
-
-    /// output stdout from bot B
-    #[arg(short = 'b')]
-    output_bot_b: bool,
-
-    /// output game log (by default this is set when none of -abg are passed)
-    #[arg(short = 'g')]
-    output_gamelog: bool,
-
-    /// when specified, output will be written to this file
-    #[arg(short, long)]
-    output: Option<PathBuf>
-}
 
 #[tokio::main]
 async fn main() {
@@ -41,11 +26,9 @@ async fn main() {
 }
 
 async fn run() -> Result<()> {
-    let mut cli = Cli::parse();
-    if !cli.output_bot_a && !cli.output_bot_b && !cli.output_gamelog {
-        cli.output_gamelog = true;
-    }
-    let cli = cli;
+
+    let cli = parse_cli();
+    let (tx, recv_task) = spawn_reciever(&cli)?;
 
 
     let conf = GameConfig {
@@ -64,15 +47,11 @@ async fn run() -> Result<()> {
     let channel_a = BotChannel::new()?;
     let channel_b = BotChannel::new()?;
 
-    let proc_a = Command::new(cli.bot_a)
-        .arg(channel_a.backing_file_path())
-        .spawn()
-        .with_context(|| "failed to launch bot A")?;
-
-    let proc_b = Command::new(cli.bot_b)
-        .arg(channel_b.backing_file_path())
-        .spawn()
-        .with_context(|| "failed to launch bot B")?;
+    spawn_bot(&cli.bot_a, channel_a.backing_file_path(), "bot a", OutputSource::BotA, tx.clone())
+        .with_context(|| "failed to launch bot a")?;
+    spawn_bot(&cli.bot_b, channel_a.backing_file_path(), "bot b", OutputSource::BotA, tx.clone())
+        .with_context(|| "failed to launch bot b")?;
+    drop(tx);
 
     let start = Instant::now();
 
@@ -122,6 +101,63 @@ async fn run() -> Result<()> {
         println!("{}", serde_json::to_string(&state).expect("parse err"));
     }
 
+
     println!("# time elapsed: {:?}", start.elapsed());
+    recv_task.await??;
+    Ok(())
+}
+
+fn spawn_bot(
+    command: &Path,
+    backing_file: &Path,
+    prefix: &'static str,
+    source: OutputSource,
+    tx: mpsc::UnboundedSender<Message>
+) -> anyhow::Result<()>{
+    let mut proc = Command::new(&command)
+        .arg(backing_file)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .with_context(|| format!("unable to spawn {prefix}"))?;
+
+    let stdout = proc.stdout.take().unwrap();
+    let stderr = proc.stderr.take().unwrap();
+
+    tokio::task::spawn(async move {
+        let tx_clone = tx.clone();
+        let stdout_task = async move {
+            let reader = BufReader::new(stdout).lines();
+            tokio::pin!(reader);
+
+            let mut reader = reader;
+            while let Some(line) = reader.next_line().await? {
+                tx_clone.send(Message {
+                    msg: format!("#[{}]: {}", prefix, line),
+                    source
+                }).unwrap();
+            }
+            Ok::<_, std::io::Error>(())
+        };
+
+        let stderr_task = async move {
+            let reader = BufReader::new(stderr).lines();
+            tokio::pin!(reader);
+
+            let mut reader = reader;
+            while let Some(line) = reader.next_line().await? {
+                tx.send(Message {
+                    msg: format!("#[{}] ERR: {}", prefix, line),
+                    source
+                }).unwrap();
+            }
+            Ok::<_, std::io::Error>(())
+        };
+        let (res1, res2) = tokio::join!(stdout_task, stderr_task);
+
+        res1?;
+        res2?;
+        Ok::<_, std::io::Error>(())
+    });
     Ok(())
 }

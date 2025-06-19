@@ -127,7 +127,7 @@ pub enum ResponseError {
     Malformed = 1,
     #[error("size mismatch (expected {expected}, actual {actual})")]
     SizeMismatch { expected: usize, actual: usize } = 2,
-    #[error("response timed out after")]
+    #[error("response timed out")]
     Timeout(#[from] Elapsed) = 3,
 }
 
@@ -188,7 +188,9 @@ impl BotChannel {
         let ptr = self.mmap.as_ptr();
         let sync = deref_sync(&self.mmap);
 
-        assert_eq!(sync.load(Ordering::Acquire), EngineStatus::Busy as u8);
+        if sync.load(Ordering::Acquire) != EngineStatus::Busy as u8 {
+            return Err(ResponseError::Malformed);
+        }
 
         unsafe {
             std::ptr::copy_nonoverlapping(
