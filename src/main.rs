@@ -125,7 +125,7 @@ fn spawn_bot(
             tokio::select! {
                 line = stdout_reader.next_line() => {
                     match line {
-                        Ok(Some(line)) => send!(tx, source, "#[{}] {}", name, line),
+                        Ok(Some(line)) => send!(tx, source, "#[{}]: {}", name, line),
                         Ok(None) | Err(_) => break,
                     }
                 }
