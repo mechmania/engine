@@ -30,7 +30,7 @@ async fn run () -> anyhow::Result<()> {
     };
 
     loop {
-        println!("shit fuck");
+        println!("sus");
         chan.handle_msg(&strat).await;
     }
 }

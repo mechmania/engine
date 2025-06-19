@@ -9,27 +9,23 @@ use tokio::{
     join,
     io::{BufReader, AsyncBufReadExt},
 };
-use anyhow::{ Context, Result };
+use anyhow::{Context, Result};
 use std::{
-    path::{ PathBuf, Path }, 
-    fs::File,
+    path::Path, 
     time::Instant,
     process::Stdio,
 };
 
-
 #[tokio::main]
 async fn main() {
     if let Err(e) = run().await {
-        eprintln!("{:?}", e.context("a fatal error occured"));
+        eprintln!("{:?}", e.context("fatal error"));
     }
 }
 
 async fn run() -> Result<()> {
-
     let cli = parse_cli();
     let (tx, recv_task) = spawn_reciever(&cli)?;
-
 
     let conf = GameConfig {
         height: 400,
@@ -42,27 +38,24 @@ async fn run() -> Result<()> {
         max_ticks: 50000,
     };
 
-    println!("{}", serde_json::to_string(&conf)?);
+    send!(tx, OutputSource::Gamelog, "{}", serde_json::to_string(&conf)?);
 
     let channel_a = BotChannel::new()?;
     let channel_b = BotChannel::new()?;
 
-    spawn_bot(&cli.bot_a, channel_a.backing_file_path(), "bot a", OutputSource::BotA, tx.clone())
-        .with_context(|| "failed to launch bot a")?;
-    spawn_bot(&cli.bot_b, channel_a.backing_file_path(), "bot b", OutputSource::BotA, tx.clone())
-        .with_context(|| "failed to launch bot b")?;
-    drop(tx);
+    let mut proc_a = spawn_bot(&cli.bot_a, channel_a.backing_file_path(), "bot_a", OutputSource::BotA, tx.clone())?;
+    let mut proc_b = spawn_bot(&cli.bot_b, channel_b.backing_file_path(), "bot_b", OutputSource::BotB, tx.clone())?;
 
     let start = Instant::now();
 
     let (p0_init_pos, p1_init_pos) = join!(
-         async { channel_a.msg::<InitProtocol>(&conf).await.unwrap_or(0.0) },
-         async { channel_b.msg::<InitProtocol>(&conf).await.unwrap_or(0.0) },
+        channel_a.msg::<InitProtocol>(&conf),
+        channel_b.msg::<InitProtocol>(&conf),
     );
 
     let mut state = GameState {
-        p0_pos: p0_init_pos,
-        p1_pos: p1_init_pos,
+        p0_pos: p0_init_pos.unwrap_or(0.0),
+        p1_pos: p1_init_pos.unwrap_or(0.0),
         p0_score: 0,
         p1_score: 0,
         ball_pos: (0.0, 0.0),
@@ -74,90 +67,77 @@ async fn run() -> Result<()> {
         && state.p0_score < conf.winning_score
         && state.p1_score < conf.winning_score
     {
-
         let (p0_vel, p1_vel) = join!(
-            async {
-                channel_a.msg::<TickProtocol>(&state)
-                    .await
-                    .map_err(|e| {
-                        println!("### Unable to process response from bot A: {e}");
-                        e
-                    })
-                    .unwrap_or(0.0)
-            },
-            async {
-                channel_b.msg::<TickProtocol>(&state)
-                    .await
-                    .map_err(|e| {
-                        println!("### Unable to process response from bot B: {e}");
-                        e
-                    })
-                    .unwrap_or(0.0)
-            }
+            get_bot_velocity(&channel_a, &state, &tx, "A"),
+            get_bot_velocity(&channel_b, &state, &tx, "B")
         );
 
         run_tick(&mut state, &conf, p0_vel, p1_vel);
-
-        println!("{}", serde_json::to_string(&state).expect("parse err"));
+        send!(tx, OutputSource::Gamelog, "{}", serde_json::to_string(&state)?);
     }
 
+    let _ = join!(proc_a.kill(), proc_b.kill());
 
-    println!("# time elapsed: {:?}", start.elapsed());
+    send!(tx, OutputSource::Gamelog, "# time elapsed: {:?}", start.elapsed());
+    drop(tx);
     recv_task.await??;
     Ok(())
+}
+
+async fn get_bot_velocity(
+    channel: &BotChannel,
+    state: &GameState,
+    tx: &mpsc::UnboundedSender<Message>,
+    bot_name: &str
+) -> f64 {
+    channel.msg::<TickProtocol>(state)
+        .await
+        .map_err(|e| {
+            send!(tx, OutputSource::Gamelog, "### Bot {} error: {}", bot_name, e);
+            e
+        })
+        .unwrap_or(0.0)
 }
 
 fn spawn_bot(
     command: &Path,
     backing_file: &Path,
-    prefix: &'static str,
+    name: &str,
     source: OutputSource,
     tx: mpsc::UnboundedSender<Message>
-) -> anyhow::Result<()>{
-    let mut proc = Command::new(&command)
+) -> Result<tokio::process::Child> {
+    let mut proc = Command::new(command)
         .arg(backing_file)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .with_context(|| format!("unable to spawn {prefix}"))?;
+        .with_context(|| format!("failed to spawn {}", name))?;
 
     let stdout = proc.stdout.take().unwrap();
     let stderr = proc.stderr.take().unwrap();
+    let name = name.to_string();
 
-    tokio::task::spawn(async move {
-        let tx_clone = tx.clone();
-        let stdout_task = async move {
-            let reader = BufReader::new(stdout).lines();
-            tokio::pin!(reader);
-
-            let mut reader = reader;
-            while let Some(line) = reader.next_line().await? {
-                tx_clone.send(Message {
-                    msg: format!("#[{}]: {}", prefix, line),
-                    source
-                }).unwrap();
+    tokio::spawn(async move {
+        let mut stdout_reader = BufReader::new(stdout).lines();
+        let mut stderr_reader = BufReader::new(stderr).lines();
+        
+        loop {
+            tokio::select! {
+                line = stdout_reader.next_line() => {
+                    match line {
+                        Ok(Some(line)) => send!(tx, source, "#[{}] {}", name, line),
+                        Ok(None) | Err(_) => break,
+                    }
+                }
+                line = stderr_reader.next_line() => {
+                    match line {
+                        Ok(Some(line)) => send!(tx, source, "#[{}] ERR: {}", name, line),
+                        Ok(None) | Err(_) => break,
+                    }
+                }
             }
-            Ok::<_, std::io::Error>(())
-        };
-
-        let stderr_task = async move {
-            let reader = BufReader::new(stderr).lines();
-            tokio::pin!(reader);
-
-            let mut reader = reader;
-            while let Some(line) = reader.next_line().await? {
-                tx.send(Message {
-                    msg: format!("#[{}] ERR: {}", prefix, line),
-                    source
-                }).unwrap();
-            }
-            Ok::<_, std::io::Error>(())
-        };
-        let (res1, res2) = tokio::join!(stdout_task, stderr_task);
-
-        res1?;
-        res2?;
-        Ok::<_, std::io::Error>(())
+        }
     });
-    Ok(())
+    
+    Ok(proc)
 }

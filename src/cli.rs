@@ -4,6 +4,7 @@ use std::io::{ self, BufWriter, Write };
 use tokio::sync::mpsc;
 use clap::Parser;
 
+
 #[derive(Parser, Clone)]
 #[command(version, about, long_about = None)]
 pub struct Cli {
@@ -11,11 +12,9 @@ pub struct Cli {
     pub bot_a: PathBuf,
     /// path to bot b binary
     pub bot_b: PathBuf,
-
-    /// output sources to print (e.g., -p ab)
-    #[arg(short = 'p', long = "print", value_parser = parse_sources)]
+    /// output sources to print (e.g., -p a,b,g)
+    #[arg(short = 'p', long = "print", value_delimiter = ',', value_parser = parse_source)]
     print: Option<Vec<OutputSource>>,
-
     /// output sources redirected to file, format: a:foo.txt g:log.json
     #[arg(short = 'o', long = "output", value_parser = parse_output_mappings)]
     output: Option<Vec<OutputMapping>>,
@@ -56,26 +55,25 @@ fn parse_output_mappings(s: &str) -> Result<OutputMapping, String> {
     let parts: Vec<&str> = s.splitn(2, ':').collect();
     if parts.len() != 2 {
         return Err(format!(
-            "Invalid format for output mapping '{}'. Use -o ab:foo.txt",
+            "Invalid format for output mapping '{}'. Use -o a,b:foo.txt",
             s
         ));
     }
-
-    let sources = parse_sources(parts[0])?;
+    let sources: Vec<OutputSource> = parts[0]
+        .split(',')
+        .map(parse_source)
+        .collect::<Result<Vec<_>, _>>()?;
     let path = PathBuf::from(parts[1]);
-
     Ok(OutputMapping { sources, path })
 }
 
-fn parse_sources(s: &str) -> Result<Vec<OutputSource>, String> {
-    s.chars()
-        .map(|c| match c {
-            'a' | 'A' => Ok(OutputSource::BotA),
-            'b' | 'B' => Ok(OutputSource::BotB),
-            'g' | 'G' => Ok(OutputSource::Gamelog),
-            _ => Err(format!("Invalid source '{}'", c)),
-        })
-        .collect()
+fn parse_source(s: &str) -> Result<OutputSource, String> {
+     match s {
+        "a" | "A" => Ok(OutputSource::BotA),
+        "b" | "B" => Ok(OutputSource::BotB),
+        "g" | "G" => Ok(OutputSource::Gamelog),
+        _ => Err(format!("Invalid source '{}'", s)),
+    }
 }
 
 struct OutputConfig {
@@ -96,6 +94,21 @@ impl OutputConfig {
         }
         Ok(())
     }
+}
+
+
+pub use crate::send;
+
+#[macro_export]
+macro_rules! send {
+    ($tx:expr, $source:expr, $fmt:literal $(, $($args:expr),*)?) => {
+        {
+            let _ = $tx.send(Message {
+                msg: format!($fmt $(, $($args),*)?),
+                source: $source
+            });
+        }
+    };
 }
 
 pub fn spawn_reciever(cli: &Cli) -> io::Result<(mpsc::UnboundedSender<Message>, tokio::task::JoinHandle<io::Result<()>>)> {
