@@ -11,8 +11,7 @@ use std::{
     time::Duration,
 };
 use thiserror::Error;
-use tokio::time::timeout;
-use tokio::time::error::Elapsed;
+use tokio::time;
 
 use crate::game::{GameConfig, GameState, InitPosition, PaddleVelocity};
 
@@ -39,7 +38,7 @@ macro_rules! define_protocols {
 
         pub trait Protocol {
             const ID: ProtocolId;
-            const TIMEOUT: Duration;
+            const TIMEOUT_FACTOR: u32;
             type Msg;
             type Response;
             fn msg_into_enum(msg: Self::Msg) -> ProtocolUnion;
@@ -60,7 +59,7 @@ macro_rules! define_protocols {
 
                 impl Protocol for [<$name Protocol>] {
                     const ID: ProtocolId    = ProtocolId::$name;
-                    const TIMEOUT: Duration = $timeout;
+                    const TIMEOUT_FACTOR: u32 = $timeout;
                     type Msg = $msg;
                     type Response = $resp;
                     fn msg_into_enum(msg: Self::Msg) -> ProtocolUnion {
@@ -114,8 +113,8 @@ macro_rules! define_protocols {
 }
 
 define_protocols! {
-    Init: (GameConfig, InitPosition, Duration::from_millis(1000)),
-    Tick: (GameState, PaddleVelocity, Duration::from_millis(20))
+    Init: (GameConfig, InitPosition, 1000),
+    Tick: (GameState, PaddleVelocity, 20)
 }
 
 #[derive(Error, Debug)]
@@ -128,7 +127,7 @@ pub enum ResponseError {
     #[error("size mismatch (expected {expected}, actual {actual})")]
     SizeMismatch { expected: usize, actual: usize } = 2,
     #[error("response timed out")]
-    Timeout(#[from] Elapsed) = 3,
+    Timeout(#[from] time::error::Elapsed) = 3,
 }
 
 pub type ResponseResult<T> = Result<T, ResponseError>;
@@ -182,7 +181,7 @@ impl BotChannel {
         self.bkgfd.path()
     }
 
-    pub async fn msg<T: Protocol>(&self, msg: &T::Msg) -> ResponseResult<T::Response> 
+    pub async fn msg<T: Protocol>(&self, msg: &T::Msg, engine_time: Duration) -> ResponseResult<T::Response> 
         where <T as Protocol>::Msg : Clone 
     {
         let ptr = self.mmap.as_ptr();
@@ -202,7 +201,7 @@ impl BotChannel {
 
         sync.store(EngineStatus::Ready as u8, Ordering::Release);
 
-        timeout(T::TIMEOUT, poll(
+        time::timeout(engine_time * T::TIMEOUT_FACTOR, poll(
             sync, 
             EngineStatus::Busy as u8
         )).await.map_err(|e| {

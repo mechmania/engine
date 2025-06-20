@@ -12,9 +12,10 @@ use tokio::{
 use anyhow::{Context, Result};
 use std::{
     path::Path, 
-    time::Instant,
+    time::{ Instant, Duration },
     process::Stdio,
 };
+use simple_moving_average::{ SumTreeSMA, SMA };
 
 #[tokio::main]
 async fn main() {
@@ -49,8 +50,8 @@ async fn run() -> Result<()> {
     let start = Instant::now();
 
     let (p0_init_pos, p1_init_pos) = join!(
-        channel_a.msg::<InitProtocol>(&conf),
-        channel_b.msg::<InitProtocol>(&conf),
+        channel_a.msg::<InitProtocol>(&conf, Duration::from_millis(1)),
+        channel_b.msg::<InitProtocol>(&conf, Duration::from_millis(1)),
     );
 
     let mut state = GameState {
@@ -63,16 +64,22 @@ async fn run() -> Result<()> {
         tick: 0,
     };
 
+    let mut ma = SumTreeSMA::<_, _, 50>::from_zero(Duration::ZERO);
+
     while state.tick < conf.max_ticks
         && state.p0_score < conf.winning_score
         && state.p1_score < conf.winning_score
     {
+        let last_tick_time = std::cmp::max(ma.get_average(), Duration::from_millis(1));
         let (p0_vel, p1_vel) = join!(
-            get_bot_velocity(&channel_a, &state, &tx, "A"),
-            get_bot_velocity(&channel_b, &state, &tx, "B")
+            get_bot_velocity(&channel_a, &state, last_tick_time, &tx, "A"),
+            get_bot_velocity(&channel_b, &state, last_tick_time, &tx, "B")
         );
 
+        let tick_start = Instant::now();
         run_tick(&mut state, &conf, p0_vel, p1_vel);
+        ma.add_sample(tick_start.elapsed());
+
         send!(tx, OutputSource::Gamelog, "{}", serde_json::to_string(&state)?);
     }
 
@@ -87,10 +94,11 @@ async fn run() -> Result<()> {
 async fn get_bot_velocity(
     channel: &BotChannel,
     state: &GameState,
+    time: Duration,
     tx: &mpsc::UnboundedSender<Message>,
     bot_name: &str
 ) -> f64 {
-    channel.msg::<TickProtocol>(state)
+    channel.msg::<TickProtocol>(state, time)
         .await
         .map_err(|e| {
             send!(tx, OutputSource::Gamelog, "### Bot {} error: {}", bot_name, e);
