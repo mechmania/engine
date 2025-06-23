@@ -86,13 +86,13 @@ impl Vec2 {
     }
 
     #[inline(always)]
-    pub fn dist_sq(&self, other: Vec2) -> f32 {
-        (other - *self).norm_sq()
+    pub fn dist_sq(&self, other: &Vec2) -> f32 {
+        (*other - *self).norm_sq()
     }
 
     #[inline(always)]
-    pub fn dist(&self, other: Vec2) -> f32 {
-        (other - *self).norm()
+    pub fn dist(&self, other: &Vec2) -> f32 {
+        (*other - *self).norm()
     }
 }
 

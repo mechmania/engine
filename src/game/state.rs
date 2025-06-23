@@ -91,19 +91,23 @@ impl<T> TeamPair<T> {
     }
 }
 
-impl<'a, T> Into<TeamPair<&'a [T]>> for &'a [T; NUM_PLAYERS as usize * 2] {
-    fn into(self) -> TeamPair<&'a [T]> {
-        TeamPair {
-            a: &self[..(NUM_PLAYERS as usize)],
-            b: &self[(NUM_PLAYERS as usize)..(NUM_PLAYERS as usize * 2)],
+impl<T> Index<Team> for PlayerArray<T> {
+    type Output = [T];
+    
+    fn index(&self, team: Team) -> &Self::Output {
+        match team {
+            Team::A => &self[..(NUM_PLAYERS as usize)],
+            Team::B => &self[(NUM_PLAYERS as usize)..]
         }
     }
 }
 
-impl<'a, T> Into<TeamPair<&'a mut [T]>> for &'a mut [T; NUM_PLAYERS as usize * 2] {
-    fn into(self) -> TeamPair<&'a mut [T]> {
-       let (a, b) = self.split_at_mut(NUM_PLAYERS as usize);
-       TeamPair::new(a, b)
+impl<T> IndexMut<Team> for PlayerArray<T> {
+    fn index_mut(&mut self, team: Team) -> &mut Self::Output {
+        match team {
+            Team::A => &mut self[..(NUM_PLAYERS as usize)],
+            Team::B => &mut self[(NUM_PLAYERS as usize)..]
+        }
     }
 }
 
@@ -122,7 +126,7 @@ pub struct PlayerState {
 #[repr(C)]
 pub struct PlayerAction {
     pub dir: Vec2,
-    pub pass_vel: Option<Vec2>,
+    pub pass: Option<Vec2>,
 }
 
 pub type TeamAction = [PlayerAction; NUM_PLAYERS as usize];
@@ -131,7 +135,7 @@ pub type PlayerArray<T> = [T; NUM_PLAYERS as usize * 2];
 #[derive(Serialize, Deserialize, Clone, PartialEq)]
 #[repr(C)]
 pub enum BallPossessionState {
-    Possesed {
+    Possessed {
         owner: PlayerId,
         team: Team,
         capture_ticks: u32,
@@ -142,12 +146,9 @@ pub enum BallPossessionState {
 
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq)]
 #[repr(C)]
-pub enum BallStagnationState {
-    Active,
-    Stagnant {
-        center: Vec2,
-        ticks: u32,
-    },
+pub struct BallStagnationState {
+    pub center: Vec2,
+    pub ticks: u32,
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq)]
@@ -178,7 +179,7 @@ impl GameState {
 
     #[inline(always)]
     pub fn ball_owner(&self) -> Option<PlayerId> {
-        if let BallPossessionState::Possesed { owner, .. } = self.ball_possession {
+        if let BallPossessionState::Possessed { owner, .. } = self.ball_possession {
             Some(owner)
         } else {
             None
@@ -197,11 +198,13 @@ impl GameState {
     }
 
     pub fn teams<'a>(&'a self) -> TeamPair<&'a [PlayerState]> {
-        (&self.players).into()
+        let (a, b) = self.players.split_at(NUM_PLAYERS as usize);
+        TeamPair { a, b }
     }
     
     pub fn teams_mut<'a>(&'a mut self) -> TeamPair<&'a mut [PlayerState]> {
-        (&mut self.players).into()
+        let (a, b) = self.players.split_at_mut(NUM_PLAYERS as usize);
+        TeamPair { a, b }
     }
 }
 

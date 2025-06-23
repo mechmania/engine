@@ -10,10 +10,13 @@ use std::{
     sync::atomic::{AtomicU8, Ordering},
     time::Duration,
 };
+use crate::game::{
+    util::Vec2,
+    config::{ GameConfig, NUM_PLAYERS },
+    state::{ GameState, PlayerAction },
+};
 use thiserror::Error;
 use tokio::time;
-
-use crate::game::{GameConfig, GameState, InitPosition, PaddleVelocity};
 
 #[repr(u8)]
 pub enum EngineStatus {
@@ -59,7 +62,7 @@ macro_rules! define_protocols {
 
                 impl Protocol for [<$name Protocol>] {
                     const ID: ProtocolId    = ProtocolId::$name;
-                    const TIMEOUT_FACTOR: Duration = $timeout;
+                    const TIMEOUT_FACTOR: u32 = $timeout;
                     type Msg = $msg;
                     type Response = $resp;
                     fn msg_into_enum(msg: Self::Msg) -> ProtocolUnion {
@@ -112,9 +115,17 @@ macro_rules! define_protocols {
     };
 }
 
+#[derive(Clone)]
+#[repr(C)]
+pub struct ResetMsg {
+    pub score: (u32, u32),
+    pub config: GameConfig,
+}
+
 define_protocols! {
-    Init: (GameConfig, InitPosition, 1000),
-    Tick: (GameState, PaddleVelocity, 20)
+    Handshake: (u64, u64, 1000),
+    Reset: (ResetMsg, [Vec2; NUM_PLAYERS as usize], 1000),
+    Tick: (GameState, [PlayerAction; NUM_PLAYERS as usize], 20)
 }
 
 #[derive(Error, Debug)]

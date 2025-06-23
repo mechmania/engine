@@ -5,6 +5,7 @@ pub const COLLISION_MAX_ITERATIONS: u32 = 100;
 pub const NUM_PLAYERS: u32 = 4;
 
 #[derive(Serialize, Deserialize, Clone, PartialEq)]
+#[repr(C)]
 pub struct BallConfig {
     pub friction: f32,
     pub radius: f32,
@@ -14,28 +15,33 @@ pub struct BallConfig {
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq)]
+#[repr(C)]
 pub struct PlayerConfig {
     pub radius: f32, 
     pub pickup_radius: f32,
     pub speed: f32,
     pub pass_speed: f32,
     pub pass_error: f32,
-    pub posession_slowdown: f32,
+    pub possession_slowdown: f32,
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq)]
+#[repr(C)]
 pub struct FieldConfig {
     pub width: u32,
     pub height: u32,
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq)]
+#[repr(C)]
 pub struct GoalConfig {
     pub height: u32,
+    pub thickness: u32,
     pub penalty_radius: u32,
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq)]
+#[repr(C)]
 pub struct HoardConfig {
     pub size: u32,
     pub radius: f32,
@@ -44,8 +50,10 @@ pub struct HoardConfig {
 
 
 #[derive(Serialize, Deserialize, Clone, PartialEq)]
+#[repr(C)]
 pub struct GameConfig {
     pub max_ticks: u32,
+    pub spawn_ball_dist: f32,
     pub hoarding: HoardConfig,
     pub ball: BallConfig,
     pub player: PlayerConfig,

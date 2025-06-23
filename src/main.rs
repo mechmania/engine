@@ -1,5 +1,5 @@
 use game_runner::{
-    game::{run_tick, GameConfig, GameState},
+    game::{eval_tick, eval_reset, GameConfig, GameState},
     ipc::*,
     cli::*,
 };
@@ -50,8 +50,8 @@ async fn run() -> Result<()> {
     let start = Instant::now();
 
     let (p0_init_pos, p1_init_pos) = join!(
-        channel_a.msg::<InitProtocol>(&conf, Duration::from_millis(1)),
-        channel_b.msg::<InitProtocol>(&conf, Duration::from_millis(1)),
+        channel_a.msg::<HandshakeProtocol>(&, Duration::from_millis(1)),
+        channel_b.msg::<HandshakeProtocol>(&, Duration::from_millis(1)),
     );
 
     let mut state = GameState {
