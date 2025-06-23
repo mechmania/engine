@@ -1,6 +1,8 @@
 use serde::{ Serialize, Deserialize };
 use std::ops::{ Add, AddAssign, Sub, SubAssign, Mul, MulAssign, Div, DivAssign, Neg };
 
+pub use std::f32::consts::PI;
+
 #[derive(Serialize, Deserialize, Clone, PartialEq, Copy)]
 pub struct Vec2 {
     pub x: f32,
@@ -10,6 +12,14 @@ pub struct Vec2 {
 
 impl Vec2 {
     pub const ZERO: Self = Vec2 { x: 0.0, y: 0.0 };
+
+    pub fn from_angle_rad(angle_rad: f32) -> Self {
+        Self::new(1.0, 0.0).rotate_rad(angle_rad)
+    }
+
+    pub fn from_angle_deg(angle_deg: f32) -> Self {
+        Self::new(1.0, 0.0).rotate_deg(angle_deg)
+    }
 
     #[inline(always)]
     pub fn new(x: f32, y: f32) -> Self {
@@ -41,7 +51,7 @@ impl Vec2 {
         self.angle_rad().to_degrees()
     }
 
-    pub fn normalize(mut self) -> Self {
+    pub fn normalize_or_zero(mut self) -> Self {
         let norm = self.norm();
         if norm == 0.0 {
             return Vec2::ZERO;
@@ -54,7 +64,7 @@ impl Vec2 {
     pub fn normalize_or_else(mut self, fallback: impl FnOnce() -> Self) -> Self {
         let norm = self.norm();
         if norm == 0.0 {
-            return Vec2::ZERO;
+            return fallback();
         }
         self.x /= norm;
         self.y /= norm;
@@ -126,6 +136,16 @@ impl Mul<f32> for Vec2 {
         self.x *= scalar;
         self.y *= scalar;
         self
+    }
+}
+
+impl Mul<Vec2> for f32 {
+    type Output = Vec2;
+
+    fn mul(self, mut vec: Vec2) -> Vec2 {
+        vec.x *= self;
+        vec.y *= self;
+        vec
     }
 }
 

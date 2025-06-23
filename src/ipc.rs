@@ -59,7 +59,7 @@ macro_rules! define_protocols {
 
                 impl Protocol for [<$name Protocol>] {
                     const ID: ProtocolId    = ProtocolId::$name;
-                    const TIMEOUT_FACTOR: u32 = $timeout;
+                    const TIMEOUT_FACTOR: Duration = $timeout;
                     type Msg = $msg;
                     type Response = $resp;
                     fn msg_into_enum(msg: Self::Msg) -> ProtocolUnion {

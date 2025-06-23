@@ -2,7 +2,6 @@ use serde::{ Serialize, Deserialize };
 use super::util::Vec2;
 use super::config::*;
 use std::ops::{ Index, IndexMut };
-use rand::{ seq::SliceRandom, thread_rng };
 
 type PlayerId = u32;
 
@@ -13,10 +12,27 @@ pub enum Team{
     B
 }
 
+impl Team {
+    pub fn other(&self) -> Team {
+        match self {
+            Team::A => Team::B,
+            Team::B => Team::A,
+        }
+    }
+}
+
+
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[repr(C)]
 pub struct TeamPair<T> {
     pub a: T,
     pub b: T,
+}
+
+impl<T> TeamPair<T> {
+    pub fn new(a: T, b: T) -> Self {
+        Self{ a, b }
+    }
 }
 
 impl<T> Index<Team> for TeamPair<T> {
@@ -38,7 +54,61 @@ impl<T> IndexMut<Team> for TeamPair<T> {
     }
 }
 
+impl<T> IntoIterator for TeamPair<T> {
+    type Item = T;
+    type IntoIter = std::array::IntoIter<T, 2>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        [self.a, self.b].into_iter()
+    }
+}
+
+impl<'a, T> IntoIterator for &'a TeamPair<T> {
+    type Item = &'a T;
+    type IntoIter = std::array::IntoIter<&'a T, 2>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        [&self.a, &self.b].into_iter()
+    }
+}
+
+impl<'a, T> IntoIterator for &'a mut TeamPair<T> {
+    type Item = &'a mut T;
+    type IntoIter = std::array::IntoIter<&'a mut T, 2>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        [&mut self.a, &mut self.b].into_iter()
+    }
+}
+
+impl<T> TeamPair<T> {
+    pub fn iter(&self) -> std::array::IntoIter<&T, 2> {
+        [&self.a, &self.b].into_iter()
+    }
+
+    pub fn iter_mut(&mut self) -> std::array::IntoIter<&mut T, 2> {
+        [&mut self.a, &mut self.b].into_iter()
+    }
+}
+
+impl<'a, T> Into<TeamPair<&'a [T]>> for &'a [T; NUM_PLAYERS as usize * 2] {
+    fn into(self) -> TeamPair<&'a [T]> {
+        TeamPair {
+            a: &self[..(NUM_PLAYERS as usize)],
+            b: &self[(NUM_PLAYERS as usize)..(NUM_PLAYERS as usize * 2)],
+        }
+    }
+}
+
+impl<'a, T> Into<TeamPair<&'a mut [T]>> for &'a mut [T; NUM_PLAYERS as usize * 2] {
+    fn into(self) -> TeamPair<&'a mut [T]> {
+       let (a, b) = self.split_at_mut(NUM_PLAYERS as usize);
+       TeamPair::new(a, b)
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, PartialEq)]
+#[repr(C)]
 pub struct PlayerState {
     pub id: PlayerId,
     pub pos: Vec2,
@@ -49,12 +119,17 @@ pub struct PlayerState {
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq)]
+#[repr(C)]
 pub struct PlayerAction {
     pub dir: Vec2,
     pub pass_vel: Option<Vec2>,
 }
 
+pub type TeamAction = [PlayerAction; NUM_PLAYERS as usize];
+pub type PlayerArray<T> = [T; NUM_PLAYERS as usize * 2];
+
 #[derive(Serialize, Deserialize, Clone, PartialEq)]
+#[repr(C)]
 pub enum BallPossessionState {
     Possesed {
         owner: PlayerId,
@@ -66,6 +141,7 @@ pub enum BallPossessionState {
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq)]
+#[repr(C)]
 pub enum BallStagnationState {
     Active,
     Stagnant {
@@ -75,6 +151,7 @@ pub enum BallStagnationState {
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq)]
+#[repr(C)]
 pub struct BallState {
     pub pos: Vec2,
     pub vel: Vec2,
@@ -82,24 +159,25 @@ pub struct BallState {
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq)]
+#[repr(C)]
 pub struct GameState {
     pub tick: u32,
     pub ball: BallState,
     pub ball_possession: BallPossessionState,
     pub ball_stagnation: BallStagnationState,
-    pub players: [PlayerState; (NUM_PLAYERS * 2) as usize],
+    pub players: PlayerArray<PlayerState>,
     // TODO goal owners, will they be used?
     pub score: TeamPair<u32>
 }
 
 impl GameState {
     #[inline(always)]
-    fn is_ball_free(&self) -> bool {
+    pub fn is_ball_free(&self) -> bool {
         matches!(self.ball_possession, BallPossessionState::Free)
     }
 
     #[inline(always)]
-    fn ball_owner(&self) -> Option<PlayerId> {
+    pub fn ball_owner(&self) -> Option<PlayerId> {
         if let BallPossessionState::Possesed { owner, .. } = self.ball_possession {
             Some(owner)
         } else {
@@ -108,7 +186,7 @@ impl GameState {
     }
 
     #[inline(always)]
-    fn player_team(&self, id: PlayerId) -> Option<Team> {
+    pub fn player_team(&self, id: PlayerId) -> Option<Team> {
         if id < NUM_PLAYERS {
             Some(Team::A)
         } else if id < NUM_PLAYERS * 2 {
@@ -118,41 +196,12 @@ impl GameState {
         }
     }
 
+    pub fn teams<'a>(&'a self) -> TeamPair<&'a [PlayerState]> {
+        (&self.players).into()
+    }
+    
+    pub fn teams_mut<'a>(&'a mut self) -> TeamPair<&'a mut [PlayerState]> {
+        (&mut self.players).into()
+    }
 }
 
-pub fn handle_player_collision(state: &mut GameState, conf: &GameConfig) {
-    let mut rng = thread_rng();
-
-    let mut iterations = 0;
-    let mut resolved = true;
-    let n = NUM_PLAYERS * 2;
-
-    let mut pairs = Vec::new();
-    pairs.reserve_exact((n * (n - 1) / 2) as usize);
-    for i in 0..n {
-        for j in (i+1)..n {
-            pairs.push((i, j));
-        }
-    }
-
-    while !resolved && iterations < COLLISION_MAX_ITERATIONS {
-        resolved = true;
-        pairs.shuffle(&mut rng);
-        // player on player collision
-        for (i, j) in pairs.iter().copied() {
-            // i assert that i know what im doing
-            // i am editing disjoint parts of the state object, and the borrow checker cannot
-            // validate that
-            let p1 = unsafe { &mut *state.players.as_mut_ptr().add(i as usize) };
-            let p2 = unsafe { &mut *state.players.as_mut_ptr().add(j as usize) };
-            let dist_sq = p1.pos.dist_sq(p2.pos);
-            let min_dist = p1.radius + p2.radius;
-            if dist_sq < min_dist.powi(2) {
-                resolved = false;
-                dist = dist_sq.sqrt();
-            }
-        }
-        iterations += 1;
-    }
-
-}
