@@ -122,6 +122,9 @@ pub struct ResetMsg {
     pub config: GameConfig,
 }
 
+pub const HANDSHAKE_ENGINE: u64 = 0xf36ab32cdeadbeef;
+pub const HANDSHAKE_BOT:    u64 = 0xabe119c019aaffcc;
+
 define_protocols! {
     Handshake: (u64, u64, 1000),
     Reset: (ResetMsg, [Vec2; NUM_PLAYERS as usize], 1000),

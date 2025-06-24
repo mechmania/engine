@@ -1,21 +1,21 @@
+use anyhow::{Context, Result};
 use game_runner::{
-    game::{eval_tick, eval_reset, GameConfig, GameState},
-    ipc::*,
     cli::*,
+    game::{eval_reset, eval_tick, GameConfig, GameState},
+    ipc::*,
+};
+use simple_moving_average::{SumTreeSMA, SMA};
+use std::{
+    path::Path,
+    process::Stdio,
+    time::{Duration, Instant},
 };
 use tokio::{
-    sync::mpsc,
-    process::Command,
+    io::{AsyncBufReadExt, BufReader},
     join,
-    io::{BufReader, AsyncBufReadExt},
+    process::Command,
+    sync::mpsc,
 };
-use anyhow::{Context, Result};
-use std::{
-    path::Path, 
-    time::{ Instant, Duration },
-    process::Stdio,
-};
-use simple_moving_average::{ SumTreeSMA, SMA };
 
 #[tokio::main]
 async fn main() {
@@ -29,40 +29,85 @@ async fn run() -> Result<()> {
     let (tx, recv_task) = spawn_reciever(&cli)?;
 
     let conf = GameConfig {
-        height: 400,
-        width: 800,
-        paddle_length: 30,
-        paddle_width: 5,
-        ball_radius: 5,
-        ball_speed: 5,
-        winning_score: 5,
-        max_ticks: 50000,
+        max_ticks: 7200,
+        spawn_ball_dist: 200,
+        ball: BallConfig {
+            friction: 0.99,
+            radius: 5.0,
+            capture_ticks: 50,
+            stagnation_radius: 30,
+            stagnation_ticks: 150,
+        },
+        player: PlayerConfig {
+            radius: 7.5,
+            pickup_radius: 15.0,
+            speed: 3.0,
+            pass_speed: 8.0,
+            pass_error: 10.0,
+            possession_slowdown: 0.75,
+        },
+        field: FieldConfig {
+            width: 800,
+            height: 600,
+        },
+        goal: GoalConfig {
+            height: 150,
+            thickness: 5,
+            penalty_radius: 35,
+        },
     };
 
-    send!(tx, OutputSource::Gamelog, "{}", serde_json::to_string(&conf)?);
+    send!(
+        tx,
+        OutputSource::Gamelog,
+        "{}",
+        serde_json::to_string(&conf)?
+    );
 
     let channel_a = BotChannel::new()?;
     let channel_b = BotChannel::new()?;
 
-    let mut proc_a = spawn_bot(&cli.bot_a, channel_a.backing_file_path(), "bot_a", OutputSource::BotA, tx.clone())?;
-    let mut proc_b = spawn_bot(&cli.bot_b, channel_b.backing_file_path(), "bot_b", OutputSource::BotB, tx.clone())?;
+    let mut proc_a = spawn_bot(
+        &cli.bot_a,
+        channel_a.backing_file_path(),
+        "bot_a",
+        OutputSource::BotA,
+        tx.clone(),
+    )?;
+    let mut proc_b = spawn_bot(
+        &cli.bot_b,
+        channel_b.backing_file_path(),
+        "bot_b",
+        OutputSource::BotB,
+        tx.clone(),
+    )?;
 
     let start = Instant::now();
 
-    let (p0_init_pos, p1_init_pos) = join!(
-        channel_a.msg::<HandshakeProtocol>(&, Duration::from_millis(1)),
-        channel_b.msg::<HandshakeProtocol>(&, Duration::from_millis(1)),
+    join!(
+        async move {
+            if !channel_a.msg::<HandshakeProtocol>(&HANDSHAKE_ENGINE, Duration::from_millis(1))
+                .await
+                .ok()
+                .map(|res| res == HANDSHAKE_BOT)
+                .unwrap_or(false) 
+            {
+                send!(tx, OutputSource::Engine, "### ERROR: bot a failed handshake");
+                proc_a.kill();
+            }
+        },
+        async move {
+            if !channel_b.msg::<HandshakeProtocol>(&HANDSHAKE_ENGINE, Duration::from_millis(1))
+                .await
+                .ok()
+                .map(|res| res == HANDSHAKE_BOT)
+                .unwrap_or(false) 
+            {
+                send!(tx, OutputSource::Engine, "### ERROR: bot b failed handshake");
+                proc_b.kill();
+            }
+        }
     );
-
-    let mut state = GameState {
-        p0_pos: p0_init_pos.unwrap_or(0.0),
-        p1_pos: p1_init_pos.unwrap_or(0.0),
-        p0_score: 0,
-        p1_score: 0,
-        ball_pos: (0.0, 0.0),
-        ball_vel: (-(conf.ball_speed as f64), conf.ball_speed as f64),
-        tick: 0,
-    };
 
     let mut ma = SumTreeSMA::<_, _, 50>::from_zero(Duration::ZERO);
 
@@ -80,12 +125,22 @@ async fn run() -> Result<()> {
         run_tick(&mut state, &conf, p0_vel, p1_vel);
         ma.add_sample(tick_start.elapsed());
 
-        send!(tx, OutputSource::Gamelog, "{}", serde_json::to_string(&state)?);
+        send!(
+            tx,
+            OutputSource::Gamelog,
+            "{}",
+            serde_json::to_string(&state)?
+        );
     }
 
     let _ = join!(proc_a.kill(), proc_b.kill());
 
-    send!(tx, OutputSource::Gamelog, "# time elapsed: {:?}", start.elapsed());
+    send!(
+        tx,
+        OutputSource::Gamelog,
+        "# time elapsed: {:?}",
+        start.elapsed()
+    );
     drop(tx);
     recv_task.await??;
     Ok(())
@@ -96,12 +151,19 @@ async fn get_bot_velocity(
     state: &GameState,
     time: Duration,
     tx: &mpsc::UnboundedSender<Message>,
-    bot_name: &str
+    bot_name: &str,
 ) -> f64 {
-    channel.msg::<TickProtocol>(state, time)
+    channel
+        .msg::<TickProtocol>(state, time)
         .await
         .map_err(|e| {
-            send!(tx, OutputSource::Gamelog, "### Bot {} error: {}", bot_name, e);
+            send!(
+                tx,
+                OutputSource::Gamelog,
+                "### Bot {} error: {}",
+                bot_name,
+                e
+            );
             e
         })
         .unwrap_or(0.0)
@@ -112,7 +174,7 @@ fn spawn_bot(
     backing_file: &Path,
     name: &str,
     source: OutputSource,
-    tx: mpsc::UnboundedSender<Message>
+    tx: mpsc::UnboundedSender<Message>,
 ) -> Result<tokio::process::Child> {
     let mut proc = Command::new(command)
         .arg(backing_file)
@@ -128,7 +190,7 @@ fn spawn_bot(
     tokio::spawn(async move {
         let mut stdout_reader = BufReader::new(stdout).lines();
         let mut stderr_reader = BufReader::new(stderr).lines();
-        
+
         loop {
             tokio::select! {
                 line = stdout_reader.next_line() => {
@@ -146,6 +208,6 @@ fn spawn_bot(
             }
         }
     });
-    
+
     Ok(proc)
 }
