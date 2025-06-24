@@ -22,7 +22,7 @@ impl Team {
 }
 
 
-#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Default)]
 #[repr(C)]
 pub struct TeamPair<T> {
     pub a: T,
@@ -122,7 +122,7 @@ pub struct PlayerState {
     pub pickup_radius: f32,
 }
 
-#[derive(Serialize, Deserialize, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, PartialEq, Default)]
 #[repr(C)]
 pub struct PlayerAction {
     pub dir: Vec2,
@@ -148,7 +148,7 @@ pub enum BallPossessionState {
 #[repr(C)]
 pub struct BallStagnationState {
     pub center: Vec2,
-    pub ticks: u32,
+    pub tick: u32,
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq)]
@@ -172,6 +172,33 @@ pub struct GameState {
 }
 
 impl GameState {
+ 
+    pub fn new(conf: &GameConfig) -> Self {
+        let center = conf.field.center();
+        GameState {
+            tick: 0,
+            ball: BallState {
+                pos: center,
+                vel: Vec2::ZERO,
+                radius: conf.ball.radius,
+            },
+            ball_possession: BallPossessionState::Free,
+            ball_stagnation: BallStagnationState {
+                center,
+                tick: 0
+            },
+            players: std::array::from_fn(|i| PlayerState {
+                id: i as u32,
+                pos: center,
+                dir: Vec2::ZERO,
+                speed: conf.player.speed,
+                radius: conf.player.radius,
+                pickup_radius: conf.player.pickup_radius
+            }),
+            score: TeamPair { a: 0, b: 0 }
+        }
+    }
+
     #[inline(always)]
     pub fn is_ball_free(&self) -> bool {
         matches!(self.ball_possession, BallPossessionState::Free)
@@ -207,4 +234,3 @@ impl GameState {
         TeamPair { a, b }
     }
 }
-

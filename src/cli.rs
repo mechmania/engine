@@ -98,7 +98,6 @@ impl OutputConfig {
 
 
 pub use crate::send;
-
 #[macro_export]
 macro_rules! send {
     ($tx:expr, $source:expr, $fmt:literal $(, $($args:expr),*)?) => {

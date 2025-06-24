@@ -13,7 +13,7 @@ use std::{
 use crate::game::{
     util::Vec2,
     config::{ GameConfig, NUM_PLAYERS },
-    state::{ GameState, PlayerAction },
+    state::{ GameState, PlayerAction, TeamPair },
 };
 use thiserror::Error;
 use tokio::time;
@@ -118,7 +118,7 @@ macro_rules! define_protocols {
 #[derive(Clone)]
 #[repr(C)]
 pub struct ResetMsg {
-    pub score: (u32, u32),
+    pub score: TeamPair<u32>,
     pub config: GameConfig,
 }
 

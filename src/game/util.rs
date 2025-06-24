@@ -183,3 +183,9 @@ impl Neg for Vec2 {
         }
     }
 }
+
+impl Default for Vec2 {
+    fn default() -> Self {
+        Vec2::ZERO
+    }
+}

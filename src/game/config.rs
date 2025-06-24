@@ -1,4 +1,5 @@
 use serde::{ Serialize, Deserialize };
+use super::util::*;
 
 pub const EPSILON: f32 = 0.001;
 pub const COLLISION_MAX_ITERATIONS: u32 = 100;
@@ -54,9 +55,19 @@ pub struct HoardConfig {
 pub struct GameConfig {
     pub max_ticks: u32,
     pub spawn_ball_dist: f32,
-    pub hoarding: HoardConfig,
+    //pub hoarding: HoardConfig,
     pub ball: BallConfig,
     pub player: PlayerConfig,
     pub field: FieldConfig,
     pub goal: GoalConfig,
+}
+
+impl FieldConfig {
+    pub fn center(&self) -> Vec2 {
+        Vec2::new(self.width as f32 * 0.5, self.height as f32 * 0.5)
+    }
+
+    pub fn bottom_right(&self) -> Vec2 {
+        Vec2::new(self.width as f32, self.height as f32)
+    }
 }

@@ -1,5 +1,4 @@
 use super::{config::*, state::*, util::*};
-use crate::ipc::ProtocolId;
 use rand::{distr::StandardUniform, prelude::*, seq::SliceRandom};
 
 fn handle_player_collision(state: &mut GameState, conf: &GameConfig) {
@@ -28,7 +27,7 @@ fn handle_player_collision(state: &mut GameState, conf: &GameConfig) {
             // validate that, so i will deref raw pointers
             let p1 = unsafe { &mut *state.players.as_mut_ptr().add(i as usize) };
             let p2 = unsafe { &mut *state.players.as_mut_ptr().add(j as usize) };
-            let dist_sq = p1.pos.dist_sq(p2.pos);
+            let dist_sq = p1.pos.dist_sq(&p2.pos);
             let min_dist = p1.radius + p2.radius;
             if dist_sq < min_dist.powi(2) {
                 resolved = false;
@@ -215,13 +214,13 @@ fn handle_ball_stagnation(
     conf: &GameConfig,
 ) -> bool {
     if state.ball.pos.dist_sq(&state.ball_stagnation.center) <= conf.ball.stagnation_radius.powi(2) {
-        state.ball_stagnation.ticks += 1;
+        state.ball_stagnation.tick += 1;
     } else {
         state.ball_stagnation.center = state.ball.pos;
-        state.ball_stagnation.ticks = 0;
+        state.ball_stagnation.tick = 0;
     }
 
-    if state.ball_stagnation.ticks >= conf.ball.stagnation_ticks {
+    if state.ball_stagnation.tick >= conf.ball.stagnation_ticks {
         println!("# Ball stayed stagnant for too long! Resetting field...");
         return true;
     }
@@ -243,7 +242,7 @@ fn handle_scoring(
         state.score.a += 1;
         return true;
     }
-    if state.ball.pos.x >= (conf.goal.height - conf.goal.thickness) as f32 {
+    if state.ball.pos.x >= (conf.field.width - conf.goal.thickness) as f32 {
         println!("# Bot B scored");
         state.score.b += 1;
         return true;
@@ -264,7 +263,7 @@ pub fn eval_reset(
     };
     state.ball_stagnation = BallStagnationState {
         center,
-        ticks: 0,
+        tick: 0,
     };
 
     let translations = [0.0, center.x];
