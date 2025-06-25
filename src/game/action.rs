@@ -5,7 +5,7 @@ fn handle_player_collision(state: &mut GameState, conf: &GameConfig) {
     let mut rng = rand::rng();
 
     let mut iterations = 0;
-    let mut resolved = true;
+    let mut resolved = false;
     let n = NUM_PLAYERS * 2;
 
     let mut pairs = Vec::new();
@@ -21,10 +21,9 @@ fn handle_player_collision(state: &mut GameState, conf: &GameConfig) {
         resolved = true;
         pairs.shuffle(&mut rng);
         // player on player collision
+
         for (i, j) in pairs.iter().copied() {
-            // i assert that i know what im doing
-            // i am editing disjoint parts of the state object, and the borrow checker cannot
-            // validate that, so i will deref raw pointers
+            // safety: disjoint players
             let p1 = unsafe { &mut *state.players.as_mut_ptr().add(i as usize) };
             let p2 = unsafe { &mut *state.players.as_mut_ptr().add(j as usize) };
             let dist_sq = p1.pos.dist_sq(&p2.pos);
@@ -43,22 +42,24 @@ fn handle_player_collision(state: &mut GameState, conf: &GameConfig) {
             }
         }
 
+        let br = conf.field.bottom_right();
+
         // player on wall collision
         for p in state.players.iter_mut() {
             if p.pos.x - p.radius < 0.0 {
                 p.pos.x = p.radius + EPSILON;
                 resolved = false;
             }
-            if p.pos.x + p.radius < conf.field.width as f32 {
-                p.pos.x = conf.field.width as f32 - p.radius - EPSILON;
+            if p.pos.x + p.radius > br.x {
+                p.pos.x = br.x - p.radius - EPSILON;
                 resolved = false;
             }
             if p.pos.y - p.radius < 0.0 {
                 p.pos.y = p.radius + EPSILON;
                 resolved = false;
             }
-            if p.pos.y + p.radius < conf.field.height as f32 {
-                p.pos.y = conf.field.height as f32 - p.radius - EPSILON;
+            if p.pos.y + p.radius > br.y {
+                p.pos.y = br.y - p.radius - EPSILON;
                 resolved = false;
             }
         }
@@ -144,8 +145,7 @@ fn handle_ball_state(
                     let norm = norm.clamp(EPSILON, 1.0);
                     pass *= norm;
                     // TODO port over colins pass logic
-                    let err = rng.sample::<f32, _>(StandardUniform) * conf.player.pass_error * 2.0
-                        - conf.player.pass_error;
+                    let err = rng.random_range(-conf.player.pass_error..conf.player.pass_error);
                     pass.rotate_deg(err);
                     state.ball.vel = pass * conf.player.pass_speed;
                 } else if *capture_ticks > conf.ball.capture_ticks {
@@ -261,6 +261,7 @@ pub fn eval_reset(
         vel: Vec2::ZERO,
         radius: conf.ball.radius
     };
+    state.ball_possession = BallPossessionState::Free;
     state.ball_stagnation = BallStagnationState {
         center,
         tick: 0,
@@ -301,6 +302,7 @@ pub fn eval_tick(
     for action in &mut actions {
         let norm = action.dir.norm();
         action.dir = action.dir.normalize_or_zero() * norm.clamp(0.0, 1.0);
+        action.pass.map(|pass| pass.normalize_or_zero());
     }
 
     handle_ball_state(state, conf, &mut actions);
@@ -311,7 +313,7 @@ pub fn eval_tick(
             _ => 1.0
         };
         player.dir = action.dir * speed_modifier;
-        player.pos += player.dir;
+        player.pos += player.dir * player.speed;
     }
 
     handle_player_collision(state, conf);

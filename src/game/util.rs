@@ -13,12 +13,15 @@ pub struct Vec2 {
 impl Vec2 {
     pub const ZERO: Self = Vec2 { x: 0.0, y: 0.0 };
 
+    #[inline(always)]
     pub fn from_angle_rad(angle_rad: f32) -> Self {
-        Self::new(1.0, 0.0).rotate_rad(angle_rad)
+        let (sin, cos) = angle_rad.sin_cos();
+        Vec2 { x: cos, y: sin }
     }
 
+    #[inline(always)]
     pub fn from_angle_deg(angle_deg: f32) -> Self {
-        Self::new(1.0, 0.0).rotate_deg(angle_deg)
+        Self::from_angle_rad(angle_deg.to_radians())
     }
 
     #[inline(always)]
