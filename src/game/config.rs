@@ -70,4 +70,12 @@ impl FieldConfig {
     pub fn bottom_right(&self) -> Vec2 {
         Vec2::new(self.width as f32, self.height as f32)
     }
+
+    pub fn goal_a(&self) -> Vec2 {
+        Vec2::new(0.0, self.height as f32 * 0.5)
+    }
+
+    pub fn goal_b(&self) -> Vec2 {
+        Vec2::new(self.width as f32, self.height as f32 * 0.5)
+    }
 }

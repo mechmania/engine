@@ -4,6 +4,7 @@ use std::ops::{ Add, AddAssign, Sub, SubAssign, Mul, MulAssign, Div, DivAssign, 
 pub use std::f32::consts::PI;
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Copy)]
+#[repr(C)]
 pub struct Vec2 {
     pub x: f32,
     pub y: f32,

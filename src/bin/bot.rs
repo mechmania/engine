@@ -202,11 +202,24 @@ fn positions(state: &GameState) -> [PlayerAction; NUM_PLAYERS as usize] {
 }
 
 fn ball_chase(state: &GameState) -> [PlayerAction; NUM_PLAYERS as usize] {
+
+    let conf = CONF.get().unwrap();
+
     std::array::from_fn(|id| {
-        println!("{}", id);
-        PlayerAction {
-            dir: (state.ball.pos - state.players[id].pos).normalize_or_zero(),
-            pass: None,
+        match state.ball_possession {
+            BallPossessionState::Possessed { owner, team, .. } if team == Team::A => {
+                let me = &state.players[id];
+                let goal_diff = conf.field.goal_b() - me.pos;
+                PlayerAction {
+                    dir: goal_diff,
+                    //pass: (owner == id as u32 && goal_diff.norm() < 100.0).then_some(goal_diff)
+                    pass: Some(goal_diff)
+                }
+            },
+            _ => PlayerAction {
+                dir: state.ball.pos - state.players[id].pos,
+                pass: None,
+            }
         }
     })
 }

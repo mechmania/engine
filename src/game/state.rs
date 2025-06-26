@@ -21,6 +21,12 @@ impl Team {
     }
 }
 
+impl Mirror for Team {
+    fn mirror(&mut self, _: &GameConfig) {
+        *self = self.other();
+    }
+}
+
 
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Default)]
 #[repr(C)]
@@ -102,6 +108,14 @@ impl<T> Index<Team> for PlayerArray<T> {
     }
 }
 
+impl<T> Mirror for TeamPair<T> where T: Mirror {
+    fn mirror(&mut self, conf: &GameConfig) {
+        std::mem::swap(&mut self.a, &mut self.b);
+        self.a.mirror(conf);
+        self.b.mirror(conf);
+    }
+}
+
 impl<T> IndexMut<Team> for PlayerArray<T> {
     fn index_mut(&mut self, team: Team) -> &mut Self::Output {
         match team {
@@ -110,6 +124,42 @@ impl<T> IndexMut<Team> for PlayerArray<T> {
         }
     }
 }
+
+pub trait Mirror {
+    fn mirror(&mut self, conf: &GameConfig);
+}
+
+impl<T> Mirror for PlayerArray<T> where T: Mirror {
+    fn mirror(&mut self, conf: &GameConfig) {
+        self.rotate_left(NUM_PLAYERS as usize);
+        self.iter_mut().for_each(|it| it.mirror(conf));
+    }
+}
+
+impl<T> Mirror for [T; NUM_PLAYERS as usize] where T: Mirror {
+    fn mirror(&mut self, conf: &GameConfig) {
+        self.iter_mut().for_each(|it| it.mirror(conf));
+    }
+}
+
+fn mirror_pos(pos: &mut Vec2, conf: &GameConfig) {
+    pos.x = conf.field.width as f32 - pos.x;
+}
+
+fn mirror_player_id(id: &mut PlayerId) {
+    if *id < NUM_PLAYERS {
+        *id += NUM_PLAYERS;
+    } else {
+        *id -= NUM_PLAYERS;
+    }
+}
+
+impl Mirror for Vec2 {
+    fn mirror(&mut self, _: &GameConfig) {
+        self.x *= -1.0;
+    }
+}
+
 
 #[derive(Serialize, Deserialize, Clone, PartialEq)]
 #[repr(C)]
@@ -122,11 +172,30 @@ pub struct PlayerState {
     pub pickup_radius: f32,
 }
 
+impl Mirror for PlayerState {
+    fn mirror(&mut self, conf: &GameConfig) {
+        mirror_player_id(&mut self.id);
+        mirror_pos(&mut self.pos, conf);
+        self.dir.mirror(conf);
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, PartialEq, Default)]
 #[repr(C)]
 pub struct PlayerAction {
     pub dir: Vec2,
     pub pass: Option<Vec2>,
+}
+
+impl Mirror for PlayerAction {
+    fn mirror(&mut self, conf: &GameConfig) {
+        self.dir.mirror(conf);
+        self.pass.map(|mut pass| pass.mirror(conf));
+    }
+}
+
+impl Mirror for u32 {
+    fn mirror(&mut self, _: &GameConfig) { }
 }
 
 pub type TeamAction = [PlayerAction; NUM_PLAYERS as usize];
@@ -144,11 +213,33 @@ pub enum BallPossessionState {
     Free
 }
 
+impl Mirror for BallPossessionState {
+    fn mirror(&mut self, conf: &GameConfig) {
+        use BallPossessionState::*;
+        match self {
+            Possessed { owner, team, .. } => {
+                mirror_player_id(owner);
+                team.mirror(conf);
+            },
+            Passing { team } => {
+                team.mirror(conf);
+            },
+            _ => ()
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq)]
 #[repr(C)]
 pub struct BallStagnationState {
     pub center: Vec2,
     pub tick: u32,
+}
+
+impl Mirror for BallStagnationState {
+    fn mirror(&mut self, conf: &GameConfig) {
+        mirror_pos(&mut self.center, conf);
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq)]
@@ -157,6 +248,13 @@ pub struct BallState {
     pub pos: Vec2,
     pub vel: Vec2,
     pub radius: f32,
+}
+
+impl Mirror for BallState {
+    fn mirror(&mut self, conf: &GameConfig) {
+        mirror_pos(&mut self.pos, conf);
+        self.vel.mirror(conf);
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq)]
@@ -169,6 +267,16 @@ pub struct GameState {
     pub players: PlayerArray<PlayerState>,
     // TODO goal owners, will they be used?
     pub score: TeamPair<u32>
+}
+
+impl Mirror for GameState {
+    fn mirror(&mut self, conf: &GameConfig) {
+        self.ball.mirror(conf);
+        self.ball_possession.mirror(conf);
+        self.ball_stagnation.mirror(conf);
+        self.players.mirror(conf);
+        self.score.mirror(conf);
+    }
 }
 
 impl GameState {
@@ -234,3 +342,4 @@ impl GameState {
         TeamPair { a, b }
     }
 }
+

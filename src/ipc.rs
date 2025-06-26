@@ -128,7 +128,7 @@ pub const HANDSHAKE_BOT:    u64 = 0xabe119c019aaffcc;
 define_protocols! {
     Handshake: (u64, u64, 1000),
     Reset: (ResetMsg, [Vec2; NUM_PLAYERS as usize], 1000),
-    Tick: (GameState, [PlayerAction; NUM_PLAYERS as usize], 20)
+    Tick: (GameState, [PlayerAction; NUM_PLAYERS as usize], 50)
 }
 
 #[derive(Error, Debug)]

@@ -1,5 +1,5 @@
 use super::{config::*, state::*, util::*};
-use rand::{distr::StandardUniform, prelude::*, seq::SliceRandom};
+use rand::{prelude::*, seq::SliceRandom};
 
 fn handle_player_collision(state: &mut GameState, conf: &GameConfig) {
     let mut rng = rand::rng();
@@ -119,10 +119,15 @@ fn handle_ball_state(
         ..
     } = ball_possession
     {
+        let mut capturing = false;
         for opponent in &players[team.other()] {
             if ball.pos.dist_sq(&opponent.pos) <= opponent.pickup_radius.powi(2) {
                 *capture_ticks += 1;
+                capturing = true;
             }
+        }
+        if !capturing && *capture_ticks > 0 {
+            *capture_ticks -= 1;
         }
     }
 
@@ -201,7 +206,7 @@ fn handle_ball_state(
                     state.ball_possession = Possessed {
                         owner: closest.id,
                         team: state.player_team(closest.id).unwrap(),
-                        capture_ticks: conf.ball.capture_ticks,
+                        capture_ticks: 0,
                     }
                 }
             }
@@ -238,13 +243,13 @@ fn handle_scoring(
         return false;
     }
     if state.ball.pos.x <= conf.goal.thickness as f32 {
-        println!("# Bot A scored");
-        state.score.a += 1;
+        println!("# Bot B scored");
+        state.score.b += 1;
         return true;
     }
     if state.ball.pos.x >= (conf.field.width - conf.goal.thickness) as f32 {
-        println!("# Bot B scored");
-        state.score.b += 1;
+        println!("# Bot A scored");
+        state.score.a += 1;
         return true;
     }
     false
@@ -321,7 +326,7 @@ pub fn eval_tick(
     if let Possessed { owner, .. } = state.ball_possession {
         state.ball.vel = Vec2::ZERO;
         let owner = &state.players[owner as usize];
-        state.ball.pos = owner.pos + owner.dir.normalize_or_zero() * (owner.radius + state.ball.radius)
+        state.ball.pos = owner.pos + owner.dir.normalize_or_zero() * (owner.radius + state.ball.radius);
     } else {
         state.ball.pos += state.ball.vel;
         state.ball.vel *= conf.ball.friction;

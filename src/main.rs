@@ -3,7 +3,7 @@ use game_runner::{
     cli::*,
     game::{
         action::{ eval_reset, eval_tick },
-        state::{ GameState, PlayerAction, TeamPair },
+        state::{ GameState, PlayerAction, TeamPair, Mirror },
         config::*,
         util::Vec2
     },
@@ -144,18 +144,18 @@ async fn run() -> Result<()> {
             radius: 5.0,
             capture_ticks: 50,
             stagnation_radius: 30.0,
-            stagnation_ticks: 300,
+            stagnation_ticks: 150,
         },
         player: PlayerConfig {
-            radius: 7.5,
-            pickup_radius: 15.0,
+            radius: 10.0,
+            pickup_radius: 25.0,
             speed: 6.0,
             pass_speed: 8.0,
             pass_error: 10.0,
             possession_slowdown: 0.75,
         },
         field: FieldConfig {
-            width: 800,
+            width: 1000,
             height: 600,
         },
         goal: GoalConfig {
@@ -186,9 +186,11 @@ async fn run() -> Result<()> {
 
     while state.tick < conf.max_ticks {
         if needs_reset {
+            let mut mirrored_score = state.score;
+            mirrored_score.mirror(&conf);
             let (formation_a, formation_b) = join!(
                 bot_a.reset(&state.score, &conf, &tx), 
-                bot_b.reset(&state.score, &conf, &tx)
+                bot_b.reset(&mirrored_score, &conf, &tx)
             );
             let formation = TeamPair::new(formation_a, formation_b);
             eval_reset(&mut state, &conf, &formation);
@@ -196,16 +198,21 @@ async fn run() -> Result<()> {
 
         let last_tick_time = std::cmp::max(ma.get_average(), Duration::from_micros(1));
 
+        let mut mirrored_state = state.clone();
+        mirrored_state.mirror(&conf);
+
         let (action_a, action_b) = join!(
             bot_a.tick(&state, last_tick_time, &tx), 
-            bot_b.tick(&state, last_tick_time, &tx)
+            bot_b.tick(&mirrored_state, last_tick_time, &tx)
         );
 
         let actions = std::array::from_fn(|i| {
             if i < NUM_PLAYERS as usize {
                 action_a[i].clone()
             } else {
-                action_b[i - NUM_PLAYERS as usize].clone()
+                let mut unmirrored = action_b[i - NUM_PLAYERS as usize].clone();
+                unmirrored.mirror(&conf);
+                unmirrored
             }
         });
 
