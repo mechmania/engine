@@ -139,9 +139,9 @@ fn handle_ball_state(
                 team,
                 capture_ticks,
             } => {
-                if let Some(pass) = actions[*owner as usize].pass {
+                if let StateOption::Some(pass) = actions[*owner as usize].pass {
                     resolved = false;
-                    actions[*owner as usize].pass = None;
+                    actions[*owner as usize].pass = StateOption::None;
                     let norm = pass.norm();
                     if norm == 0.0 {
                         continue;
@@ -307,7 +307,7 @@ pub fn eval_tick(
     for action in &mut actions {
         let norm = action.dir.norm();
         action.dir = action.dir.normalize_or_zero() * norm.clamp(0.0, 1.0);
-        action.pass.map(|pass| pass.normalize_or_zero());
+        action.pass.option().map(|pass| pass.normalize_or_zero());
     }
 
     handle_ball_state(state, conf, &mut actions);

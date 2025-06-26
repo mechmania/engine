@@ -87,7 +87,7 @@ fn positions(state: &GameState) -> [PlayerAction; NUM_PLAYERS as usize] {
 
             PlayerAction {
                 dir: move_dir,
-                pass: pass_target,
+                pass: pass_target.into(),
             }
         }
         // Field players logic (players 1-3)
@@ -100,7 +100,7 @@ fn positions(state: &GameState) -> [PlayerAction; NUM_PLAYERS as usize] {
                     let shoot_dir = goal_pos - player.pos;
                     return PlayerAction {
                         dir: Vec2::ZERO,
-                        pass: Some(shoot_dir.normalize_or_zero()),
+                        pass: StateOption::Some(shoot_dir.normalize_or_zero()),
                     };
                 }
 
@@ -148,7 +148,7 @@ fn positions(state: &GameState) -> [PlayerAction; NUM_PLAYERS as usize] {
                         let pass_dir = target - player.pos;
                         return PlayerAction {
                             dir: Vec2::ZERO,
-                            pass: Some(pass_dir.normalize_or_zero()),
+                            pass: Some(pass_dir.normalize_or_zero()).into(),
                         };
                     }
                 }
@@ -157,7 +157,7 @@ fn positions(state: &GameState) -> [PlayerAction; NUM_PLAYERS as usize] {
                 let move_dir = (goal_pos - player.pos).normalize_or_zero();
                 PlayerAction {
                     dir: move_dir,
-                    pass: None,
+                    pass: None.into(),
                 }
             }
             // If player doesn't have ball
@@ -173,7 +173,7 @@ fn positions(state: &GameState) -> [PlayerAction; NUM_PLAYERS as usize] {
                                 (state.ball.pos - player.pos).normalize_or_zero();
                             return PlayerAction {
                                 dir: move_dir,
-                                pass: None,
+                                pass: None.into(),
                             };
                         }
                     }
@@ -193,7 +193,7 @@ fn positions(state: &GameState) -> [PlayerAction; NUM_PLAYERS as usize] {
                 let move_dir = (target_pos - player.pos).normalize_or_zero();
                 PlayerAction {
                     dir: move_dir,
-                    pass: None,
+                    pass: None.into(),
                 }
             }
         }
@@ -213,23 +213,20 @@ fn ball_chase(state: &GameState) -> [PlayerAction; NUM_PLAYERS as usize] {
                 PlayerAction {
                     dir: goal_diff,
                     //pass: (owner == id as u32 && goal_diff.norm() < 100.0).then_some(goal_diff)
-                    pass: Some(goal_diff)
+                    pass: Some(goal_diff).into()
                 }
             },
             _ => PlayerAction {
                 dir: state.ball.pos - state.players[id].pos,
-                pass: None,
+                pass: None.into(),
             }
         }
     })
 }
 
-fn nothing(state: &GameState) -> [PlayerAction; NUM_PLAYERS as usize] {
+fn nothing(_: &GameState) -> [PlayerAction; NUM_PLAYERS as usize] {
     std::array::from_fn(|_| {
-        PlayerAction {
-            dir: Vec2::ZERO,
-            pass: None,
-        }
+        Default::default()
     })
 }
 

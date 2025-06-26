@@ -6,6 +6,46 @@ use std::ops::{ Index, IndexMut };
 type PlayerId = u32;
 
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[repr(u8, C)]
+pub enum StateOption<T> {
+    None    = 0,
+    Some(T) = 1
+}
+
+impl<T> Default for StateOption<T> {
+    fn default() -> Self {
+        StateOption::None
+    }
+}
+
+impl<T> From<StateOption<T>> for Option<T> {
+    fn from(value: StateOption<T>) -> Self {
+        match value {
+            StateOption::Some(t) => Some(t),
+            StateOption::None => None
+        }
+    }
+}
+
+impl<T> From<Option<T>> for StateOption<T> {
+    fn from(value: Option<T>) -> Self {
+        match value {
+            Some(t) => StateOption::Some(t),
+            None    => StateOption::None
+        }
+    }
+}
+
+impl<T> StateOption<T> {
+    pub fn option(self) -> Option<T> {
+        match self {
+            StateOption::None => None,
+            StateOption::Some(t) => Some(t)
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum Team{
     A,
@@ -184,13 +224,13 @@ impl Mirror for PlayerState {
 #[repr(C)]
 pub struct PlayerAction {
     pub dir: Vec2,
-    pub pass: Option<Vec2>,
+    pub pass: StateOption<Vec2>,
 }
 
 impl Mirror for PlayerAction {
     fn mirror(&mut self, conf: &GameConfig) {
         self.dir.mirror(conf);
-        self.pass.map(|mut pass| pass.mirror(conf));
+        self.pass.option().map(|mut pass| pass.mirror(conf));
     }
 }
 
@@ -202,7 +242,7 @@ pub type TeamAction = [PlayerAction; NUM_PLAYERS as usize];
 pub type PlayerArray<T> = [T; NUM_PLAYERS as usize * 2];
 
 #[derive(Serialize, Deserialize, Clone, PartialEq)]
-#[repr(C)]
+#[repr(u8, C)]
 pub enum BallPossessionState {
     Possessed {
         owner: PlayerId,
