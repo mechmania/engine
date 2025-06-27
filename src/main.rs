@@ -3,7 +3,7 @@ use game_runner::{
     cli::*,
     game::{
         action::{ eval_reset, eval_tick },
-        state::{ GameState, PlayerAction, TeamPair, Mirror },
+        state::{ GameState, PlayerAction, TeamPair, Mirror, mirror_pos },
         config::*,
         util::Vec2
     },
@@ -135,10 +135,11 @@ async fn main() {
 async fn run() -> Result<()> {
     let cli = parse_cli();
     let (tx, recv_task) = spawn_reciever(&cli)?;
+    
 
     let conf = GameConfig {
         max_ticks: 7200,
-        spawn_ball_dist: 200.0,
+        spawn_ball_dist: 100.0,
         ball: BallConfig {
             friction: 0.99,
             radius: 5.0,
@@ -149,8 +150,8 @@ async fn run() -> Result<()> {
         player: PlayerConfig {
             radius: 10.0,
             pickup_radius: 25.0,
-            speed: 6.0,
-            pass_speed: 8.0,
+            speed: 4.0,
+            pass_speed: 12.0,
             pass_error: 10.0,
             possession_slowdown: 0.75,
         },
@@ -165,6 +166,7 @@ async fn run() -> Result<()> {
         },
     };
 
+
     send!(
         tx,
         OutputSource::Gamelog,
@@ -172,26 +174,33 @@ async fn run() -> Result<()> {
         serde_json::to_string(&conf)?
     );
 
+
     let (mut bot_a, mut bot_b) = (
         BotManager::spawn(&cli.bot_a, "A", OutputSource::BotA, tx.clone())?,
         BotManager::spawn(&cli.bot_b, "B", OutputSource::BotB, tx.clone())?,
     );
 
+
     let start = Instant::now();
     join!(bot_a.handshake(&tx), bot_b.handshake(&tx));
     let mut ma = SumTreeSMA::<_, _, 50>::from_zero(Duration::ZERO);
 
+
     let mut state = GameState::new(&conf);
     let mut needs_reset = true;
+
+
+
 
     while state.tick < conf.max_ticks {
         if needs_reset {
             let mut mirrored_score = state.score;
             mirrored_score.mirror(&conf);
-            let (formation_a, formation_b) = join!(
+            let (formation_a, mut formation_b) = join!(
                 bot_a.reset(&state.score, &conf, &tx), 
                 bot_b.reset(&mirrored_score, &conf, &tx)
             );
+            formation_b.iter_mut().for_each(|pos| mirror_pos(pos, &conf));
             let formation = TeamPair::new(formation_a, formation_b);
             eval_reset(&mut state, &conf, &formation);
         }

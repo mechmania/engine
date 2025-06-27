@@ -182,11 +182,11 @@ impl<T> Mirror for [T; NUM_PLAYERS as usize] where T: Mirror {
     }
 }
 
-fn mirror_pos(pos: &mut Vec2, conf: &GameConfig) {
+pub fn mirror_pos(pos: &mut Vec2, conf: &GameConfig) {
     pos.x = conf.field.width as f32 - pos.x;
 }
 
-fn mirror_player_id(id: &mut PlayerId) {
+pub fn mirror_player_id(id: &mut PlayerId) {
     if *id < NUM_PLAYERS {
         *id += NUM_PLAYERS;
     } else {

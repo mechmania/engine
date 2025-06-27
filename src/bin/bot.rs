@@ -207,13 +207,12 @@ fn ball_chase(state: &GameState) -> [PlayerAction; NUM_PLAYERS as usize] {
 
     std::array::from_fn(|id| {
         match state.ball_possession {
-            BallPossessionState::Possessed { owner, team, .. } if team == Team::A => {
+            BallPossessionState::Possessed { owner, .. } if owner as usize == id => {
                 let me = &state.players[id];
                 let goal_diff = conf.field.goal_b() - me.pos;
                 PlayerAction {
-                    dir: goal_diff,
-                    //pass: (owner == id as u32 && goal_diff.norm() < 100.0).then_some(goal_diff)
-                    pass: Some(goal_diff).into()
+                    dir: goal_diff - Vec2::new(50.0, 0.0),
+                    pass: (goal_diff.norm() < 300.0).then_some(goal_diff.normalize_or_zero()).into()
                 }
             },
             _ => PlayerAction {
@@ -244,8 +243,13 @@ async fn run() -> anyhow::Result<()> {
         on_reset: Box::new(|msg| {
             let ResetMsg { config, .. } = msg;
             let _ = CONF.set(config.clone());
-            let center = config.field.center();
-            [center, center, center, center]
+            let f = Vec2::new(config.field.width as f32 / 2.0, config.field.height as f32);
+            [
+                Vec2::new(f.x * 0.93, f.y * 1.0 / 5.0), 
+                Vec2::new(f.x * 0.93, f.y * 2.2 / 5.0), 
+                Vec2::new(f.x * 0.93, f.y * 2.8 / 5.0), 
+                Vec2::new(f.x * 0.93, f.y * 4.0 / 5.0), 
+            ]
         }),
         on_tick: Box::new(ball_chase),
     };

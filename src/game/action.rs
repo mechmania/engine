@@ -1,8 +1,29 @@
+use std::cell::RefCell;
+
 use super::{config::*, state::*, util::*};
 use rand::{prelude::*, seq::SliceRandom};
 
+thread_local! {
+    static RNG: RefCell<SmallRng> = RefCell::new(SmallRng::from_rng(&mut rand::rng()));
+}
+
+fn with_rng<T>(f: impl FnOnce(&mut SmallRng) -> T) -> T {
+    RNG.with(|rng| f(&mut rng.borrow_mut()))
+}
+
+fn rand_player_iter<'a>(players: &'a [PlayerState]) -> std::vec::IntoIter<&'a PlayerState> {
+    let mut ret: Vec<&PlayerState> = players.iter().collect();
+    with_rng(|rng| ret.shuffle(rng));
+    ret.into_iter()
+}
+
+fn rand_player_iter_mut<'a>(players: &'a mut [PlayerState]) -> std::vec::IntoIter<&'a mut PlayerState> {
+    let mut ret: Vec<&mut PlayerState> = players.iter_mut().collect();
+    with_rng(|rng| ret.shuffle(rng));
+    ret.into_iter()
+}
+
 fn handle_player_collision(state: &mut GameState, conf: &GameConfig) {
-    let mut rng = rand::rng();
 
     let mut iterations = 0;
     let mut resolved = false;
@@ -19,7 +40,7 @@ fn handle_player_collision(state: &mut GameState, conf: &GameConfig) {
 
     while !resolved && iterations < COLLISION_MAX_ITERATIONS {
         resolved = true;
-        pairs.shuffle(&mut rng);
+        with_rng(|rng| pairs.shuffle(rng));
         // player on player collision
 
         for (i, j) in pairs.iter().copied() {
@@ -32,7 +53,7 @@ fn handle_player_collision(state: &mut GameState, conf: &GameConfig) {
                 resolved = false;
                 let dist = dist_sq.sqrt();
                 let dv = (p2.pos - p1.pos).normalize_or_else(|| {
-                    let angle = rng.random_range(0.0..(2.0 * PI));
+                    let angle = with_rng(|rng| rng.random_range(0.0..(2.0 * PI)));
                     Vec2::from_angle_rad(angle)
                 });
                 let diff = min_dist - dist;
@@ -88,7 +109,7 @@ fn closer_pickup(a: &PlayerState, b: &PlayerState, c: &Vec2) -> std::cmp::Orderi
     let pickup_ac = a.pos.dist(c) - a.pickup_radius;
     let pickup_bc = b.pos.dist(c) - b.pickup_radius;
     if pickup_ac <= EPSILON && pickup_bc <= EPSILON {
-        return if rand::rng().random_bool(0.5) {
+        return if with_rng(|rng| rng.random_bool(0.5)) {
             Ordering::Less
         } else {
             Ordering::Greater
@@ -104,7 +125,6 @@ fn handle_ball_state(
 ) {
     use BallPossessionState::*;
     let mut resolved = false;
-    let mut rng = rand::rng();
 
     let GameState {
         players,
@@ -140,8 +160,11 @@ fn handle_ball_state(
                 capture_ticks,
             } => {
                 if let StateOption::Some(pass) = actions[*owner as usize].pass {
+                    let owner = *owner;
                     resolved = false;
-                    actions[*owner as usize].pass = StateOption::None;
+                    actions[owner as usize].pass = StateOption::None;
+                    let owner = &state.players[owner as usize];
+
                     let norm = pass.norm();
                     if norm == 0.0 {
                         continue;
@@ -150,14 +173,15 @@ fn handle_ball_state(
                     let norm = norm.clamp(EPSILON, 1.0);
                     pass *= norm;
                     // TODO port over colins pass logic
-                    let err = rng.random_range(-conf.player.pass_error..conf.player.pass_error);
+                    let err = with_rng(|rng| rng.random_range(-conf.player.pass_error..conf.player.pass_error));
                     pass.rotate_deg(err);
+                    state.ball_possession = Passing { team: *team };
                     state.ball.vel = pass * conf.player.pass_speed;
+                    state.ball.pos = owner.pos + owner.dir.normalize_or_zero() * (owner.radius + state.ball.radius);
                 } else if *capture_ticks > conf.ball.capture_ticks {
                     resolved = false;
                     // get closest opponent to the ball
-                    let closest_opponent = state.players[team.other()]
-                        .iter()
+                    let closest_opponent = rand_player_iter(&state.players[team.other()])
                         .min_by(|a, b| closer_pickup(&a, &b, &state.ball.pos))
                         .unwrap()
                         .id;
@@ -169,8 +193,7 @@ fn handle_ball_state(
                 }
             }
             Passing { team } => {
-                let closest_opponent = state.players[team.other()]
-                    .iter()
+                let closest_opponent = rand_player_iter(&state.players[team.other()])
                     .min_by(|a, b| closer_pickup(&a, &b, &state.ball.pos))
                     .unwrap();
                 if closest_opponent.pos.dist_sq(&state.ball.pos)
@@ -180,12 +203,11 @@ fn handle_ball_state(
                     state.ball_possession = Possessed {
                         owner: closest_opponent.id,
                         team: team.other(),
-                        capture_ticks: conf.ball.capture_ticks,
+                        capture_ticks: 0,
                     };
                     continue;
                 }
-                let closest_teammate = state.players[*team]
-                    .iter()
+                let closest_teammate = rand_player_iter(&state.players[*team])
                     .min_by(|a, b| closer_pickup(&a, &b, &state.ball.pos))
                     .unwrap();
                 if closest_teammate.pos.dist_sq(&state.ball.pos)
@@ -196,8 +218,7 @@ fn handle_ball_state(
                 }
             }
             Free => {
-                let closest = state
-                    .players
+                let closest = &state.players
                     .iter()
                     .min_by(|a, b| closer_pickup(&a, &b, &state.ball.pos))
                     .unwrap();
@@ -242,12 +263,12 @@ fn handle_scoring(
     if !goal_bounds.contains(&state.ball.pos.y) {
         return false;
     }
-    if state.ball.pos.x <= conf.goal.thickness as f32 {
+    if state.ball.pos.x - state.ball.radius <= conf.goal.thickness as f32 {
         println!("# Bot B scored");
         state.score.b += 1;
         return true;
     }
-    if state.ball.pos.x >= (conf.field.width - conf.goal.thickness) as f32 {
+    if state.ball.pos.x + state.ball.radius >= (conf.field.width - conf.goal.thickness) as f32 {
         println!("# Bot A scored");
         state.score.a += 1;
         return true;
@@ -260,7 +281,7 @@ pub fn eval_reset(
     conf: &GameConfig,
     formation: &TeamPair<[Vec2; NUM_PLAYERS as usize]>,
 ) {
-    let center = Vec2::new(conf.field.width as f32 / 2.0, conf.field.height as f32 / 2.0);
+    let center = conf.field.center();
     state.ball = BallState {
         pos: center,
         vel: Vec2::ZERO,
@@ -279,14 +300,14 @@ pub fn eval_reset(
         .zip(state.teams_mut().iter_mut()) 
         .zip(formation.iter())
     {
-        for (player, pos) in team.iter_mut().zip(formation) {
+        for (player, pos) in rand_player_iter_mut(team).zip(formation) {
 
             let mut pos = Vec2::new(
                 pos.x.clamp(dx, dx + center.x), 
                 pos.y.clamp(0.0, conf.field.height as f32)
             );
 
-            if pos.dist_sq(&center) < conf.spawn_ball_dist {
+            if pos.dist_sq(&center) < conf.spawn_ball_dist.powi(2) {
                 pos = center + (pos - center).normalize_or_else(|| {
                     Vec2::new((dx - EPSILON).signum(), 0.0)
                 }) * conf.spawn_ball_dist;
@@ -338,19 +359,19 @@ pub fn eval_tick(
         );
         if state.ball.pos.x < left {
             state.ball.pos.x = left + EPSILON;
-            state.ball.vel.x *= conf.ball.friction.powi(2);
+            state.ball.vel.x *= -conf.ball.friction.powi(2);
         }
         if state.ball.pos.x > right {
             state.ball.pos.x = right - EPSILON;
-            state.ball.vel.x *= conf.ball.friction.powi(2);
+            state.ball.vel.x *= -conf.ball.friction.powi(2);
         }
         if state.ball.pos.y < top {
             state.ball.pos.y = top + EPSILON;
-            state.ball.vel.y *= conf.ball.friction.powi(2);
+            state.ball.vel.y *= -conf.ball.friction.powi(2);
         }
         if state.ball.pos.y > bottom {
             state.ball.pos.y = bottom - EPSILON;
-            state.ball.vel.y *= conf.ball.friction.powi(2);
+            state.ball.vel.y *= -conf.ball.friction.powi(2);
         }
     }
 
