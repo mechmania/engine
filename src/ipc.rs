@@ -149,7 +149,7 @@ pub type ResponseResult<T> = Result<T, ResponseError>;
 #[repr(C)]
 struct Shm {
     sync: AtomicU8,
-    union: ProtocolUnion,
+    protocol: ProtocolUnion,
 }
 
 async fn poll(au8: &AtomicU8, cmp: u8) {
