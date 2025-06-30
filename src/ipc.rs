@@ -208,7 +208,7 @@ impl BotChannel {
         unsafe {
             std::ptr::copy_nonoverlapping(
                 &T::msg_into_enum(msg.clone()) as *const ProtocolUnion,
-                ptr.add(offset_of!(Shm, union)) as *mut ProtocolUnion,
+                ptr.add(offset_of!(Shm, protocol)) as *mut ProtocolUnion,
                 1
             )
         }
@@ -240,12 +240,12 @@ impl BotChannel {
             });
         }
 
-        let discriminant = self.mmap[offset_of!(Shm, union)];
+        let discriminant = self.mmap[offset_of!(Shm, protocol)];
         if discriminant != T::response_discriminant() {
             return Err(ResponseError::Malformed);
         }
 
-        let union = unsafe { &*(ptr.add(offset_of!(Shm, union)) as *const ProtocolUnion) };
+        let union = unsafe { &*(ptr.add(offset_of!(Shm, protocol)) as *const ProtocolUnion) };
         Ok(T::enum_into_response(union.clone()))
     }
 }
@@ -283,7 +283,7 @@ impl EngineChannel {
         ).await;
 
         // safe to deref because engine is trusted
-        let msg = unsafe { &mut* (self.mmap.as_ptr().add(offset_of!(Shm, union)) as *mut ProtocolUnion) };
+        let msg = unsafe { &mut* (self.mmap.as_ptr().add(offset_of!(Shm, protocol)) as *mut ProtocolUnion) };
         let response = strategy.handle_msg(msg);
         *msg = response;
 

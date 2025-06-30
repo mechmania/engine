@@ -230,7 +230,9 @@ pub struct PlayerAction {
 impl Mirror for PlayerAction {
     fn mirror(&mut self, conf: &GameConfig) {
         self.dir.mirror(conf);
-        self.pass.option().map(|mut pass| pass.mirror(conf));
+        if let StateOption::Some(ref mut pass) = self.pass {
+            pass.mirror(conf);
+        }
     }
 }
 

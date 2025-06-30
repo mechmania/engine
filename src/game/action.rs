@@ -108,7 +108,7 @@ fn closer_pickup(a: &PlayerState, b: &PlayerState, c: &Vec2) -> std::cmp::Orderi
     use std::cmp::Ordering;
     let pickup_ac = a.pos.dist(c) - a.pickup_radius;
     let pickup_bc = b.pos.dist(c) - b.pickup_radius;
-    if pickup_ac <= EPSILON && pickup_bc <= EPSILON {
+    if pickup_ac <= 1.0 && pickup_bc <= 1.0 {
         return if with_rng(|rng| rng.random_bool(0.5)) {
             Ordering::Less
         } else {
@@ -218,8 +218,7 @@ fn handle_ball_state(
                 }
             }
             Free => {
-                let closest = &state.players
-                    .iter()
+                let closest = rand_player_iter(&state.players)
                     .min_by(|a, b| closer_pickup(&a, &b, &state.ball.pos))
                     .unwrap();
                 if closest.pos.dist_sq(&state.ball.pos) <= closest.pickup_radius.powi(2) {
@@ -339,6 +338,7 @@ pub fn eval_tick(
             _ => 1.0
         };
         player.dir = action.dir * speed_modifier;
+        //player.pos += player.dir * player.speed + Vec2::from_angle_rad(with_rng(|rng| rng.random_range(0.0..(2.0*PI)))) * 5.0;
         player.pos += player.dir * player.speed;
     }
 
