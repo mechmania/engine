@@ -88,6 +88,7 @@ macro_rules! define_protocols {
                 }
             )*
             #[derive(Clone)]
+            #[repr(u8, C)]
             pub enum ProtocolUnion {
                 $(
                     [<$name Msg>]($msg),

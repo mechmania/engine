@@ -80,16 +80,33 @@ impl BotManager {
         if !self.channel
             .msg::<HandshakeProtocol>(&HANDSHAKE_ENGINE, Duration::from_millis(1))
             .await
+            .map_err(|e| {
+                send!(
+                    tx,
+                    OutputSource::Gamelog,
+                    "### FATAL ERROR: bot {} failed handshake: {}",
+                    self.name,
+                    e
+                );
+                e
+            })
             .ok()
-            .map(|res| res == HANDSHAKE_BOT)
+            .map(|res| {
+                let matches = res == HANDSHAKE_BOT;
+                if !matches {
+                    send!(
+                        tx,
+                        OutputSource::Gamelog,
+                        "### FATAL ERROR: bot {} failed handshake: expected {}, got {}",
+                        self.name,
+                        HANDSHAKE_BOT,
+                        res
+                    );
+                }
+                matches
+            })
             .unwrap_or(false)
         {
-            send!(
-                tx,
-                OutputSource::Gamelog,
-                "### FATAL ERROR: bot {} failed handshake",
-                self.name
-            );
             let _ = self.process.kill().await;
         }
     }
@@ -134,7 +151,7 @@ async fn main() {
 
 async fn run() -> Result<()> {
     let cli = parse_cli();
-    let (tx, recv_task) = spawn_reciever(&cli)?;
+    let (tx, _recv_task) = spawn_reciever(&cli)?;
     
 
     let conf = GameConfig {
@@ -246,6 +263,5 @@ async fn run() -> Result<()> {
         start.elapsed()
     );
     drop(tx);
-    recv_task.await??;
     Ok(())
 }
