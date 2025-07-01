@@ -5,7 +5,7 @@ use std::ops::{ Index, IndexMut };
 
 type PlayerId = u32;
 
-#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
 #[repr(u8, C)]
 pub enum StateOption<T> {
     None    = 0,
@@ -220,7 +220,7 @@ impl Mirror for PlayerState {
     }
 }
 
-#[derive(Serialize, Deserialize, Clone, PartialEq, Default)]
+#[derive(Serialize, Deserialize, Clone, PartialEq, Default, Debug)]
 #[repr(C)]
 pub struct PlayerAction {
     pub dir: Vec2,

@@ -156,7 +156,7 @@ async fn run() -> Result<()> {
 
     let conf = GameConfig {
         max_ticks: 7200,
-        spawn_ball_dist: 100.0,
+        spawn_ball_dist: 200.0,
         ball: BallConfig {
             friction: 0.99,
             radius: 5.0,
@@ -234,6 +234,9 @@ async fn run() -> Result<()> {
 
         let actions = std::array::from_fn(|i| {
             if i < NUM_PLAYERS as usize {
+                //if i == 1 {
+                //    println!("{:?}", &action_a[i].dir);
+                //}
                 action_a[i].clone()
             } else {
                 let mut unmirrored = action_b[i - NUM_PLAYERS as usize].clone();
