@@ -1,9 +1,9 @@
 use anyhow::{Context, Result};
-use game_runner::{
+use engine::{
     cli::*,
     game::{
         action::{ eval_reset, eval_tick },
-        state::{ GameState, PlayerAction, TeamPair, Mirror, mirror_pos },
+        state::{ Team ,GameState, PlayerAction, TeamPair, Mirror, mirror_pos },
         config::*,
         util::Vec2
     },
@@ -22,10 +22,15 @@ use tokio::{
     sync::mpsc,
 };
 
+const TOTAL_COMPUTE_TICKS: u32 = 100000;
+const DELAY_TICKS: u32 = 2000;
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+
 struct BotManager {
     channel: BotChannel,
     process: tokio::process::Child,
     name: String,
+    ticks: u32,
 }
 
 impl BotManager {
@@ -73,12 +78,13 @@ impl BotManager {
             channel,
             process,
             name: name.to_string(),
+            ticks: TOTAL_COMPUTE_TICKS
         })
     }
 
-    async fn handshake(&mut self, tx: &mpsc::UnboundedSender<Message>) {
+    async fn handshake(&mut self, team: Team, config: &GameConfig, tx: &mpsc::UnboundedSender<Message>) {
         if !self.channel
-            .msg::<HandshakeProtocol>(&HANDSHAKE_ENGINE, Duration::from_millis(1))
+            .msg::<HandshakeProtocol>(&HandshakeMsg { team, config: config.clone() }, HANDSHAKE_TIMEOUT)
             .await
             .map_err(|e| {
                 send!(
@@ -111,9 +117,10 @@ impl BotManager {
         }
     }
 
-    async fn reset(&mut self, score: &TeamPair<u32>, conf: &GameConfig, tx: &mpsc::UnboundedSender<Message>) -> [Vec2; NUM_PLAYERS as usize] {
-        self.channel
-            .msg::<ResetProtocol>(&ResetMsg { score: score.clone(), config: conf.clone() }, Duration::from_millis(1))
+    async fn reset(&mut self, score: &TeamPair<u32>, engine_time: Duration, tx: &mpsc::UnboundedSender<Message>) -> [Vec2; NUM_PLAYERS as usize] {
+        let time = Instant::now();
+        let res = self.channel
+            .msg::<ResetProtocol>(score, self.ticks * engine_time)
             .await
             .unwrap_or_else(|e| {
                 send!(
@@ -123,12 +130,20 @@ impl BotManager {
                     self.name
                 );
                 Default::default()
-            })
+            });
+        let elapsed = time.elapsed().div_duration_f64(engine_time) as u32;
+        self.ticks = if elapsed <= DELAY_TICKS {
+            TOTAL_COMPUTE_TICKS.min(self.ticks + DELAY_TICKS - elapsed)
+        } else {
+            self.ticks - self.ticks.min(elapsed - DELAY_TICKS)
+        };
+        res
     }
 
     async fn tick(&mut self, state: &GameState, engine_time: Duration, tx: &mpsc::UnboundedSender<Message>) -> [PlayerAction; NUM_PLAYERS as usize] {
-        self.channel
-            .msg::<TickProtocol>(state, engine_time)
+        let time = Instant::now();
+        let res = self.channel
+            .msg::<TickProtocol>(state, self.ticks * engine_time)
             .await
             .unwrap_or_else(|e| {
                 send!(
@@ -138,7 +153,14 @@ impl BotManager {
                     self.name
                 );
                 Default::default()
-            })
+            });
+        let elapsed = time.elapsed().div_duration_f64(engine_time) as u32;
+        self.ticks = if elapsed <= DELAY_TICKS {
+            TOTAL_COMPUTE_TICKS.min(self.ticks + DELAY_TICKS - elapsed)
+        } else {
+            self.ticks - self.ticks.min(elapsed - DELAY_TICKS)
+        };
+        res
     }
 }
 
@@ -199,44 +221,42 @@ async fn run() -> Result<()> {
 
 
     let start = Instant::now();
-    join!(bot_a.handshake(&tx), bot_b.handshake(&tx));
-    let mut ma = SumTreeSMA::<_, _, 50>::from_zero(Duration::ZERO);
+    join!(bot_a.handshake(Team::A, &conf, &tx), bot_b.handshake(Team::B, &conf, &tx));
+    let mut ma = SumTreeSMA::<_, _, 50>::from_zero(Duration::from_millis(1));
 
 
     let mut state = GameState::new(&conf);
     let mut needs_reset = true;
 
 
-
-
     while state.tick < conf.max_ticks {
+        let last_tick_time = ma.get_average();
+
         if needs_reset {
             let mut mirrored_score = state.score;
             mirrored_score.mirror(&conf);
-            let (formation_a, mut formation_b) = join!(
-                bot_a.reset(&state.score, &conf, &tx), 
-                bot_b.reset(&mirrored_score, &conf, &tx)
+            let (formation_a, mut formation_b) = (
+                bot_a.reset(&state.score, last_tick_time, &tx).await, 
+                bot_b.reset(&mirrored_score, last_tick_time, &tx).await
             );
             formation_b.iter_mut().for_each(|pos| mirror_pos(pos, &conf));
             let formation = TeamPair::new(formation_a, formation_b);
             eval_reset(&mut state, &conf, &formation);
         }
 
-        let last_tick_time = std::cmp::max(ma.get_average(), Duration::from_micros(1));
-
         let mut mirrored_state = state.clone();
         mirrored_state.mirror(&conf);
 
-        let (action_a, action_b) = join!(
-            bot_a.tick(&state, last_tick_time, &tx), 
-            bot_b.tick(&mirrored_state, last_tick_time, &tx)
+        let (mut action_a, mut action_b) = (
+            bot_a.tick(&state, last_tick_time, &tx).await, 
+            bot_b.tick(&mirrored_state, last_tick_time, &tx).await
         );
+
+        action_a.iter_mut().for_each(|a| a.sanitize());
+        action_b.iter_mut().for_each(|a| a.sanitize());
 
         let actions = std::array::from_fn(|i| {
             if i < NUM_PLAYERS as usize {
-                //if i == 1 {
-                //    println!("{:?}", &action_a[i].dir);
-                //}
                 action_a[i].clone()
             } else {
                 let mut unmirrored = action_b[i - NUM_PLAYERS as usize].clone();

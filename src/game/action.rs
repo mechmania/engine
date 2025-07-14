@@ -299,7 +299,7 @@ pub fn eval_reset(
         .zip(state.teams_mut().iter_mut()) 
         .zip(formation.iter())
     {
-        for (player, pos) in rand_player_iter_mut(team).zip(formation) {
+        for (player, pos) in team.iter_mut().zip(formation) {
 
             let mut pos = Vec2::new(
                 pos.x.clamp(dx, dx + center.x), 

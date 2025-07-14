@@ -1,5 +1,5 @@
 {
-  description = "tinker with configuration files without having to rebuild your system";
+  description = "mechmania 31 game engine";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";

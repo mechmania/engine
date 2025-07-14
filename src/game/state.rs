@@ -227,6 +227,17 @@ pub struct PlayerAction {
     pub pass: StateOption<Vec2>,
 }
 
+impl PlayerAction {
+    pub fn sanitize(&mut self) {
+        if !self.dir.x.is_finite() { self.dir.x = 0.0; }
+        if !self.dir.y.is_finite() { self.dir.y = 0.0; }
+        if let StateOption::Some(pass) = &mut self.pass {
+            if !pass.x.is_finite() { pass.x = 0.0; }
+            if !pass.y.is_finite() { pass.y = 0.0; }
+        }
+    }
+}
+
 impl Mirror for PlayerAction {
     fn mirror(&mut self, conf: &GameConfig) {
         self.dir.mirror(conf);

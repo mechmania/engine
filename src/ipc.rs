@@ -13,7 +13,7 @@ use std::{
 use crate::game::{
     util::Vec2,
     config::{ GameConfig, NUM_PLAYERS },
-    state::{ GameState, PlayerAction, TeamPair },
+    state::{ Team, GameState, PlayerAction, TeamPair },
 };
 use thiserror::Error;
 use tokio::time;
@@ -28,7 +28,7 @@ pub enum EngineStatus {
 macro_rules! define_protocols {
     (
         $(
-            $name:ident: ($msg:ty, $resp:ty, $timeout:expr)
+            $name:ident: ($msg:ty, $resp:ty)
         ),* $(,)?
     ) => {
         #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -41,7 +41,6 @@ macro_rules! define_protocols {
 
         pub trait Protocol {
             const ID: ProtocolId;
-            const TIMEOUT_FACTOR: u32;
             type Msg;
             type Response;
             fn msg_into_enum(msg: Self::Msg) -> ProtocolUnion;
@@ -62,7 +61,6 @@ macro_rules! define_protocols {
 
                 impl Protocol for [<$name Protocol>] {
                     const ID: ProtocolId    = ProtocolId::$name;
-                    const TIMEOUT_FACTOR: u32 = $timeout;
                     type Msg = $msg;
                     type Response = $resp;
                     fn msg_into_enum(msg: Self::Msg) -> ProtocolUnion {
@@ -123,13 +121,21 @@ pub struct ResetMsg {
     pub config: GameConfig,
 }
 
-pub const HANDSHAKE_ENGINE: u64 = 0xf36ab32cdeadbeef;
-pub const HANDSHAKE_BOT:    u64 = 0xabe119c019aaffcc;
+#[derive(Clone)]
+#[repr(C)]
+pub struct HandshakeMsg{
+    pub team: Team,
+    pub config: GameConfig
+}
+
+type Score = TeamPair<u32>;
+
+pub const HANDSHAKE_BOT: u64 = 0xabe119c019aaffcc;
 
 define_protocols! {
-    Handshake: (u64, u64, 1000),
-    Reset: (ResetMsg, [Vec2; NUM_PLAYERS as usize], 2000),
-    Tick: (GameState, [PlayerAction; NUM_PLAYERS as usize], 100000)
+    Handshake: (HandshakeMsg, u64),
+    Reset: (Score, [Vec2; NUM_PLAYERS as usize]),
+    Tick: (GameState, [PlayerAction; NUM_PLAYERS as usize])
 }
 
 #[derive(Error, Debug)]
@@ -196,7 +202,7 @@ impl BotChannel {
         self.bkgfd.path()
     }
 
-    pub async fn msg<T: Protocol>(&self, msg: &T::Msg, engine_time: Duration) -> ResponseResult<T::Response> 
+    pub async fn msg<T: Protocol>(&self, msg: &T::Msg, timeout: Duration) -> ResponseResult<T::Response> 
         where <T as Protocol>::Msg : Clone 
     {
         let ptr = self.mmap.as_ptr();
@@ -216,7 +222,7 @@ impl BotChannel {
 
         sync.store(EngineStatus::Ready as u8, Ordering::Release);
 
-        time::timeout(engine_time * T::TIMEOUT_FACTOR, poll(
+        time::timeout(timeout, poll(
             sync, 
             EngineStatus::Busy as u8
         )).await.map_err(|e| {
