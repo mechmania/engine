@@ -1,5 +1,5 @@
 [package]
-name = "mm31-engine"
+name = "mm-engine"
 version = "0.1.0"
 edition = "2021"
 

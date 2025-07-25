@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use engine::{
+use mm_engine::{
     cli::*,
     game::{
         action::{ eval_reset, eval_tick },
