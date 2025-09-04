@@ -159,14 +159,16 @@ struct Shm {
     protocol: ProtocolUnion,
 }
 
+#[inline(never)]
 async fn poll(au8: &AtomicU8, cmp: u8) {
     for i in 0.. {
         if au8.load(Ordering::Acquire) == cmp {
+            // println!("poll finished after iteration: {i}");
             return;
         }
         match i {
             0..100 => hint::spin_loop(),
-            100..1000 => tokio::task::yield_now().await,
+            100..1000 => std::thread::yield_now(),
             _ => tokio::time::sleep(Duration::from_micros(i / 10)).await,
         }
     }

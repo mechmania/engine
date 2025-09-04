@@ -318,7 +318,6 @@ pub struct GameState {
     pub ball_possession: BallPossessionState,
     pub ball_stagnation: BallStagnationState,
     pub players: PlayerArray<PlayerState>,
-    // TODO goal owners, will they be used?
     pub score: TeamPair<u32>
 }
 

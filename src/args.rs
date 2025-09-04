@@ -7,17 +7,17 @@ use clap::Parser;
 
 #[derive(Parser, Clone)]
 #[command(version, about, long_about = None)]
-pub struct Cli {
+pub struct ArgConfig {
     /// path to bot a binary
     pub bot_a: PathBuf,
     /// path to bot b binary
     pub bot_b: PathBuf,
     /// output sources to print (e.g., -p a,b,g)
     #[arg(short = 'p', long = "print", value_delimiter = ',', value_parser = parse_source)]
-    print: Option<Vec<OutputSource>>,
+    pub print: Option<Vec<OutputSource>>,
     /// output sources redirected to file, format: a:foo.txt g:log.json
     #[arg(short = 'o', long = "output", value_parser = parse_output_mappings)]
-    output: Option<Vec<OutputMapping>>,
+    pub output: Option<Vec<OutputMapping>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -29,9 +29,9 @@ pub enum OutputSource {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct OutputMapping {
-    sources: Vec<OutputSource>,
-    path: PathBuf,
+pub struct OutputMapping {
+    pub sources: Vec<OutputSource>,
+    pub path: PathBuf,
 }
 
 pub struct Message {
@@ -39,8 +39,8 @@ pub struct Message {
     pub source: OutputSource
 }
 
-pub fn parse_cli() -> Cli { 
-    let mut cli = Cli::parse();
+pub fn parse_cli() -> ArgConfig { 
+    let mut cli = ArgConfig::parse();
     if let (None, None) = (cli.print.as_ref(), cli.output.as_ref()) {
         cli.print = Some(vec![
             OutputSource::BotA,
@@ -110,7 +110,7 @@ macro_rules! send {
     };
 }
 
-pub fn spawn_reciever(cli: &Cli) -> io::Result<(mpsc::UnboundedSender<Message>, tokio::task::JoinHandle<io::Result<()>>)> {
+pub fn spawn_reciever(cli: &ArgConfig) -> io::Result<(mpsc::UnboundedSender<Message>, tokio::task::JoinHandle<io::Result<()>>)> {
     let (tx, mut rx) = mpsc::unbounded_channel();
 
     let mut print = [false; 3];
