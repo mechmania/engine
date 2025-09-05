@@ -5,7 +5,7 @@ use tokio::sync::mpsc;
 use clap::Parser;
 
 
-#[derive(Parser, Clone)]
+#[derive(Parser, Clone, Debug)]
 #[command(version, about, long_about = None)]
 pub struct ArgConfig {
     /// path to bot a binary
@@ -126,6 +126,11 @@ pub fn spawn_reciever(cli: &ArgConfig) -> io::Result<(mpsc::UnboundedSender<Mess
 
     if let Some(output) = &cli.output {
         for (i, o) in output.iter().enumerate() {
+
+            if let Some(parent) = o.path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+
             let buf = BufWriter::new(File::create(&o.path)?);
             files.push(buf);
             for s in &o.sources {

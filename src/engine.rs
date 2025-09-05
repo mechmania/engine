@@ -92,6 +92,7 @@ impl BotManager {
             .await
             .map_err(|e| {
                 self.ticks = 0;
+                eprintln!("### FATAL ERROR: bot {} failed handshake: {}", self.name, e);
                 send!(
                     tx,
                     OutputSource::Gamelog,
@@ -106,6 +107,7 @@ impl BotManager {
                 let matches = res == HANDSHAKE_BOT;
                 if !matches {
                     self.ticks = 0;
+                    eprintln!("### FATAL ERROR: bot {} failed handshake: expected {}, got {}", self.name, HANDSHAKE_BOT, res);
                     send!(
                         tx,
                         OutputSource::Gamelog,
@@ -134,6 +136,7 @@ impl BotManager {
             .msg::<ResetProtocol>(score, self.ticks * engine_time)
             .await
             .unwrap_or_else(|e| {
+                eprintln!("### [bot {}] error resetting: {e}", self.name);
                 send!(
                     tx,
                     OutputSource::Gamelog,
@@ -162,6 +165,7 @@ impl BotManager {
             .msg::<TickProtocol>(state, self.ticks * engine_time)
             .await
             .unwrap_or_else(|e| {
+                eprintln!("### [bot {}] error on tick: {e}", self.name);
                 send!(
                     tx,
                     OutputSource::Gamelog,
