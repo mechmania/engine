@@ -83,12 +83,10 @@ fn handle_player_collision(state: &mut GameState, conf: &GameConfig) {
 
                 if p.pos.y - p.radius < top {
                     p.pos.y = top + p.radius + EPSILON;
-                    println!("player moved");
                     resolved = false;
                 }
                 if p.pos.y + p.radius > bottom {
                     p.pos.y = bottom - p.radius - EPSILON;
-                    println!("player moved");
                     resolved = false;
                 }
             } else if dist_from_edge < box_width + p.radius {
@@ -115,14 +113,12 @@ fn handle_player_collision(state: &mut GameState, conf: &GameConfig) {
                         let dist = dist_sq.sqrt();
                         let dv = (p.pos - corner_pos).normalize_or_zero();
                         p.pos += dv * (min_dist - dist + EPSILON);
-                    println!("player moved");
                         resolved = false;
                     }
                 }
             } else if dist_from_edge < box_width + p.radius {
                 // Zone 3: Push away from vertical wall
                 p.pos.x = box_x_base + x_multiplier * (box_width + p.radius + EPSILON);
-                    println!("player moved");
                 resolved = false;
             }
         };
