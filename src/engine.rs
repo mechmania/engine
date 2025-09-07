@@ -175,6 +175,7 @@ impl BotManager {
                 Default::default()
             });
         let elapsed = time.elapsed().div_duration_f64(engine_time) as u32;
+        // println!("bot {} took {} ticks", self.name, elapsed);
         self.ticks = if elapsed <= DELAY_TICKS {
             TOTAL_COMPUTE_TICKS.min(self.ticks + DELAY_TICKS - elapsed)
         } else {
@@ -292,12 +293,18 @@ pub async fn run(args: ArgConfig) -> Result<()> {
         );
     }
 
-
     send!(
         tx,
         OutputSource::Gamelog,
-        "# time elapsed: {:?}",
-        start.elapsed()
+        "# time elapsed: {:?}\n{}",
+        start.elapsed(),
+        if state.score.a > state.score.b {
+            "# Winner: Bot A"
+        } else if state.score.a < state.score.b {
+            "# Winner: Bot B"
+        } else {
+            "# TIE"
+        }
     );
 
     // Forcibly abort the I/O tasks (this drops their tx clones)
