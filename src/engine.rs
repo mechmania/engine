@@ -293,33 +293,46 @@ pub async fn run(args: ArgConfig) -> Result<()> {
         );
     }
 
+    let winner = if state.score.a > state.score.b {
+        Some("Bot A")
+    } else if state.score.a < state.score.b {
+        Some("Bot B")
+    } else {
+        None
+    };
+
     send!(
         tx,
         OutputSource::Gamelog,
         "# time elapsed: {:?}\n{}",
         start.elapsed(),
-        if state.score.a > state.score.b {
-            "# Winner: Bot A"
-        } else if state.score.a < state.score.b {
-            "# Winner: Bot B"
+        if let Some(winner) = winner {
+            format!(" Winner: {}", winner)
         } else {
-            "# TIE"
+            "# TIE".to_string()
         }
     );
 
-    // Forcibly abort the I/O tasks (this drops their tx clones)
     bot_a.io_task.abort();
     bot_b.io_task.abort();
 
-    // Kill processes
     let _ = join!(bot_a.process.kill(), bot_b.process.kill());
 
-    // Now drop everything
     drop(tx);
     drop(bot_a);
     drop(bot_b);
 
-    // This should work now
     let _ = recv_task.await;
+
+    println!("# Final Score: A: {} B: {}\n# {}", 
+        state.score.a,
+        state.score.b,
+        if let Some(winner) = winner {
+            format!("{} wins!", winner)
+        } else {
+            "The match was a TIE".to_string()
+        }
+    );
+
     Ok(())
 }
