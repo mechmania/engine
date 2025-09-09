@@ -67,69 +67,64 @@ fn handle_player_collision(state: &mut GameState, conf: &GameConfig) {
 
         let br = conf.field.bottom_right();
 
-        // Helper function to handle penalty box collision for one side
         let mut check_penalty_box = |p: &mut PlayerState, box_x_base: f32, x_multiplier: f32| {
             let box_width = conf.goal.penalty_box_width as f32;
             let box_radius = conf.goal.penalty_box_radius as f32;
             let box_height = conf.goal.penalty_box_height as f32;
             let center_y = conf.field.center().y;
 
-            let dist_from_edge = (p.pos.x - box_x_base).abs();
+            let dist_from_edge = (p.pos.x - box_x_base).abs() - p.radius;
+            let off_y = p.pos.y - center_y;
 
+            // Zone 1: inside the straight vertical wall
             if dist_from_edge < box_width - box_radius {
-                // Zone 1: Inside straight section - check horizontal walls
-                let top = center_y - box_height / 2.0;
-                let bottom = center_y + box_height / 2.0;
-
-                if p.pos.y - p.radius < top {
-                    p.pos.y = top + p.radius + EPSILON;
+                if off_y.abs() - p.radius < box_height * 0.5 {
+                    p.pos.y = center_y + off_y.signum() * (box_height * 0.5 + p.radius + EPSILON);
                     resolved = false;
                 }
-                if p.pos.y + p.radius > bottom {
-                    p.pos.y = bottom - p.radius - EPSILON;
-                    resolved = false;
-                }
-            } else if dist_from_edge < box_width + p.radius {
-                // Zone 2: Rounded corner region
+            }
+            // Zone 2: vertical wall strip (between rounded corners)
+            else if dist_from_edge < box_width && off_y.abs() < box_height * 0.5 - box_radius {
+                p.pos.x = box_x_base + x_multiplier * (box_width + p.radius + EPSILON);
+                resolved = false;
+            }
+            // Zone 3: rounded corners (top and bottom arcs)
+            else if dist_from_edge < box_width + p.radius {
                 let corner_x = box_x_base + x_multiplier * (box_width - box_radius);
                 let top_corner_y = center_y - box_height / 2.0 + box_radius;
                 let bottom_corner_y = center_y + box_height / 2.0 - box_radius;
 
-                // Check which corner to test
-                let (corner_y, in_corner_zone) = if p.pos.y < top_corner_y {
-                    (top_corner_y, true)
-                } else if p.pos.y > bottom_corner_y {
-                    (bottom_corner_y, true)
+                // choose nearest corner circle (top or bottom)
+                let corner_y = if p.pos.y < center_y {
+                    top_corner_y
                 } else {
-                    (0.0, false)
+                    bottom_corner_y
                 };
 
-                if in_corner_zone {
-                    let corner_pos = Vec2::new(corner_x, corner_y);
-                    let dist_sq = p.pos.dist_sq(&corner_pos);
-                    let min_dist = box_radius + p.radius;
+                let corner_pos = Vec2::new(corner_x, corner_y);
+                let dist_vec = p.pos - corner_pos;
+                let dist_sq = dist_vec.norm_sq();
+                let min_dist = box_radius + p.radius;
 
-                    if dist_sq < min_dist * min_dist {
-                        let dist = dist_sq.sqrt();
-                        let dv = (p.pos - corner_pos).normalize_or_zero();
-                        p.pos += dv * (min_dist - dist + EPSILON);
-                        resolved = false;
-                    }
+                if dist_sq < min_dist * min_dist {
+                    let dist = dist_sq.sqrt();
+                    let dv = if dist > 1e-6 {
+                        dist_vec / dist
+                    } else {
+                        Vec2::new(x_multiplier, 0.0) 
+                    };
+                    p.pos += dv * (min_dist - dist + EPSILON);
+                    resolved = false;
                 }
-            } else if dist_from_edge < box_width + p.radius {
-                // Zone 3: Push away from vertical wall
-                p.pos.x = box_x_base + x_multiplier * (box_width + p.radius + EPSILON);
-                resolved = false;
             }
         };
 
+
         for p in state.players.iter_mut() {
-            // Goal A (left side)
             if p.pos.x < conf.goal.penalty_box_width as f32 + p.radius {
                 check_penalty_box(p, 0.0, 1.0);
             }
 
-            // Goal B (right side)
             if p.pos.x > br.x - conf.goal.penalty_box_width as f32 - p.radius {
                 check_penalty_box(p, br.x, -1.0);
             }
