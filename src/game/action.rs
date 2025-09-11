@@ -89,7 +89,7 @@ fn handle_player_collision(state: &mut GameState, conf: &GameConfig) {
                 resolved = false;
             }
             // Zone 3: rounded corners (top and bottom arcs)
-            else if dist_from_edge < box_width + p.radius {
+            else if dist_from_edge < box_width {
                 let corner_x = box_x_base + x_multiplier * (box_width - box_radius);
                 let top_corner_y = center_y - box_height / 2.0 + box_radius;
                 let bottom_corner_y = center_y + box_height / 2.0 - box_radius;
@@ -118,7 +118,6 @@ fn handle_player_collision(state: &mut GameState, conf: &GameConfig) {
                 }
             }
         };
-
 
         for p in state.players.iter_mut() {
             if p.pos.x < conf.goal.penalty_box_width as f32 + p.radius {
@@ -322,7 +321,7 @@ fn handle_scoring(
     conf: &GameConfig,
 ) -> bool {
     let center = Vec2::new(conf.field.width as f32 / 2.0, conf.field.height as f32 / 2.0);
-    let h = conf.goal.normal_height as f32;
+    let h = conf.goal.current_height(conf, state.tick) as f32;
     let goal_bounds = (center.y - h / 2.0)..(center.y + h / 2.0);
     if !goal_bounds.contains(&state.ball.pos.y) {
         return false;
@@ -346,8 +345,10 @@ pub fn eval_reset(
     formation: &TeamPair<[Vec2; NUM_PLAYERS as usize]>,
 ) {
     let center = conf.field.center();
+    let team_bias = Vec2::new(20.0, 0.0) * (state.score.a as i32 - state.score.b as i32).signum() as f32;
+
     state.ball = BallState {
-        pos: center,
+        pos: center + team_bias,
         vel: Vec2::ZERO,
         radius: conf.ball.radius
     };
@@ -388,6 +389,9 @@ pub fn eval_tick(
     conf: &GameConfig, 
     mut actions: PlayerArray<PlayerAction>
 ) -> bool {
+
+    let is_endgame = state.tick >= conf.max_ticks;
+
     use BallPossessionState::*;
     for action in &mut actions {
         let norm = action.dir.norm();
@@ -403,7 +407,6 @@ pub fn eval_tick(
             _ => 1.0
         };
         player.dir = action.dir * speed_modifier;
-        //player.pos += player.dir * player.speed + Vec2::from_angle_rad(with_rng(|rng| rng.random_range(0.0..(2.0*PI)))) * 5.0;
         player.pos += player.dir * player.speed;
     }
 
@@ -414,8 +417,13 @@ pub fn eval_tick(
         let owner = &state.players[owner as usize];
         state.ball.pos = owner.pos + owner.dir.normalize_or_zero() * (owner.radius + state.ball.radius);
     } else {
+        let friction = if is_endgame {
+            1.01
+        } else {
+            conf.ball.friction
+        };
         state.ball.pos += state.ball.vel;
-        state.ball.vel *= conf.ball.friction;
+        state.ball.vel *= friction;
         let (left, right, top, bottom) = (
             state.ball.radius,
             conf.field.width as f32 - state.ball.radius,
@@ -424,19 +432,19 @@ pub fn eval_tick(
         );
         if state.ball.pos.x < left {
             state.ball.pos.x = left + EPSILON;
-            state.ball.vel.x *= -conf.ball.friction.powi(2);
+            state.ball.vel.x *= -friction.powi(2);
         }
         if state.ball.pos.x > right {
             state.ball.pos.x = right - EPSILON;
-            state.ball.vel.x *= -conf.ball.friction.powi(2);
+            state.ball.vel.x *= -friction.powi(2);
         }
         if state.ball.pos.y < top {
             state.ball.pos.y = top + EPSILON;
-            state.ball.vel.y *= -conf.ball.friction.powi(2);
+            state.ball.vel.y *= -friction.powi(2);
         }
         if state.ball.pos.y > bottom {
             state.ball.pos.y = bottom - EPSILON;
-            state.ball.vel.y *= -conf.ball.friction.powi(2);
+            state.ball.vel.y *= -friction.powi(2);
         }
     }
 
