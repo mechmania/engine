@@ -49,7 +49,7 @@ impl GoalConfig {
         if tick <= conf.max_ticks {
             self.normal_height
         } else {
-            self.penalty_box_height
+            conf.field.height
         }
     }
 }
