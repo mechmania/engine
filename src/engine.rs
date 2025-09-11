@@ -215,9 +215,9 @@ pub async fn run(args: ArgConfig) -> Result<()> {
         goal: GoalConfig {
             normal_height: 150,
             thickness: 5,
-            penalty_box_width: 80,
-            penalty_box_height: 200,
-            penalty_box_radius: 35,
+            penalty_box_width: 91,
+            penalty_box_height: 250,
+            penalty_box_radius: 24,
         },
     };
 
@@ -304,13 +304,8 @@ pub async fn run(args: ArgConfig) -> Result<()> {
     send!(
         tx,
         OutputSource::Gamelog,
-        "# time elapsed: {:?}\n{}",
-        start.elapsed(),
-        if let Some(winner) = winner {
-            format!(" Winner: {}", winner)
-        } else {
-            "# TIE".to_string()
-        }
+        "# time elapsed: {:?}",
+        start.elapsed()
     );
 
     bot_a.io_task.abort();
@@ -328,7 +323,7 @@ pub async fn run(args: ArgConfig) -> Result<()> {
         state.score.a,
         state.score.b,
         if let Some(winner) = winner {
-            format!("{} wins!", winner)
+            format!("The winner is {}", winner)
         } else {
             "The match was a TIE".to_string()
         }
