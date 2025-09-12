@@ -221,7 +221,6 @@ pub async fn run(args: ArgConfig) -> Result<()> {
         },
     };
 
-
     send!(
         tx,
         OutputSource::Gamelog,
@@ -229,24 +228,27 @@ pub async fn run(args: ArgConfig) -> Result<()> {
         serde_json::to_string(&conf)?
     );
 
-
     let (mut bot_a, mut bot_b) = (
         BotManager::spawn(&args.bot_a, "A", OutputSource::BotA, tx.clone())?,
         BotManager::spawn(&args.bot_b, "B", OutputSource::BotB, tx.clone())?,
     );
 
-
     let start = Instant::now();
     join!(bot_a.handshake(Team::A, &conf, &tx), bot_b.handshake(Team::B, &conf, &tx));
     let mut ma = SumTreeSMA::<_, _, 50>::from_zero(Duration::from_millis(1));
 
-
     let mut state = GameState::new(&conf);
     let mut needs_reset = true;
-
+    let mut endgame_reset = false;
 
     while state.tick < conf.max_ticks || (state.tick < (conf.max_ticks + conf.endgame_ticks) && state.score.a == state.score.b) {
         let last_tick_time = ma.get_average();
+
+        // call reset during endgame
+        if !endgame_reset && state.tick >= conf.max_ticks {
+            needs_reset = true;
+            endgame_reset = true;
+        }
 
         if needs_reset {
             let mut mirrored_score = state.score;
