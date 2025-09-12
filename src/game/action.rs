@@ -327,13 +327,13 @@ fn handle_scoring(
         return false;
     }
     if state.ball.pos.x - state.ball.radius <= conf.goal.thickness as f32 {
-        println!("# Bot B scored! A: {} B: {}", state.score.a, state.score.b);
         state.score.b += 1;
+        println!("# Bot B scored! A: {} B: {}", state.score.a, state.score.b);
         return true;
     }
     if state.ball.pos.x + state.ball.radius >= (conf.field.width - conf.goal.thickness) as f32 {
-        println!("# Bot A scored! A: {} B: {}", state.score.a, state.score.b);
         state.score.a += 1;
+        println!("# Bot A scored! A: {} B: {}", state.score.a, state.score.b);
         return true;
     }
     false
