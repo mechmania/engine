@@ -20,8 +20,8 @@ use tokio::{
     sync::mpsc,
 };
 
-const TOTAL_COMPUTE_TICKS: u32 = 100000;
-const DELAY_TICKS: u32 = 2000;
+const TOTAL_COMPUTE_TICKS: u32 = 50000;
+const DELAY_TICKS: u32 = 1000;
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
 struct BotManager {
@@ -175,7 +175,7 @@ impl BotManager {
                 Default::default()
             });
         let elapsed = time.elapsed().div_duration_f64(engine_time) as u32;
-        // println!("bot {} took {} ticks", self.name, elapsed);
+        println!("bot {} took {} ticks", self.name, elapsed);
         self.ticks = if elapsed <= DELAY_TICKS {
             TOTAL_COMPUTE_TICKS.min(self.ticks + DELAY_TICKS - elapsed)
         } else {
@@ -243,6 +243,7 @@ pub async fn run(args: ArgConfig) -> Result<()> {
 
     while state.tick < conf.max_ticks || (state.tick < (conf.max_ticks + conf.endgame_ticks) && state.score.a == state.score.b) {
         let last_tick_time = ma.get_average();
+        println!("engine tick time: {:?}", last_tick_time);
 
         // call reset during endgame
         if !endgame_reset && state.tick >= conf.max_ticks {
@@ -265,10 +266,9 @@ pub async fn run(args: ArgConfig) -> Result<()> {
         let mut mirrored_state = state.clone();
         mirrored_state.mirror(&conf);
 
-        let (mut action_a, mut action_b) = join!(
-            bot_a.tick(&state, last_tick_time, &tx), 
-            bot_b.tick(&mirrored_state, last_tick_time, &tx)
-        );
+        let mut action_a = bot_a.tick(&state, last_tick_time, &tx).await;
+        // tokio::time::sleep(Duration::from_millis(1000)).await;
+        let mut action_b = bot_b.tick(&state, last_tick_time, &tx).await;
 
         action_a.iter_mut().for_each(|a| a.sanitize());
         action_b.iter_mut().for_each(|a| a.sanitize());
