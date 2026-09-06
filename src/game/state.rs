@@ -1,15 +1,24 @@
-use serde::{ Serialize, Deserialize };
-use super::util::Vec2;
+#[cfg(feature = "engine")]
+use crate::game::diff::Diff;
+use crate::game::team::TeamPair;
+
 use super::config::*;
-use std::ops::{ Index, IndexMut };
+use super::util::{normalize_degrees, Vec2};
+use serde::{Deserialize, Serialize};
+use std::ops::{Index, IndexMut};
 
-type PlayerId = u32;
+pub type BotId = u8;
 
+
+// NOTE the rust compiler sometimes does some optimization with the standard option enum
+// for example, if a datatype is invalid when the memory is all 0's, the compiler will use
+// this value in memory as the None variant rather than having an explicit discriminant in memory.
+// to work around this, we define our own silly enum so the compiler does not do this
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
 #[repr(u8, C)]
 pub enum StateOption<T> {
-    None    = 0,
-    Some(T) = 1
+    None = 0,
+    Some(T) = 1,
 }
 
 impl<T> Default for StateOption<T> {
@@ -22,7 +31,7 @@ impl<T> From<StateOption<T>> for Option<T> {
     fn from(value: StateOption<T>) -> Self {
         match value {
             StateOption::Some(t) => Some(t),
-            StateOption::None => None
+            StateOption::None => None,
         }
     }
 }
@@ -31,7 +40,7 @@ impl<T> From<Option<T>> for StateOption<T> {
     fn from(value: Option<T>) -> Self {
         match value {
             Some(t) => StateOption::Some(t),
-            None    => StateOption::None
+            None => StateOption::None,
         }
     }
 }
@@ -40,127 +49,7 @@ impl<T> StateOption<T> {
     pub fn option(self) -> Option<T> {
         match self {
             StateOption::None => None,
-            StateOption::Some(t) => Some(t)
-        }
-    }
-}
-
-#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
-#[repr(u8)]
-pub enum Team{
-    A,
-    B
-}
-
-impl Team {
-    pub fn other(&self) -> Team {
-        match self {
-            Team::A => Team::B,
-            Team::B => Team::A,
-        }
-    }
-}
-
-impl Mirror for Team {
-    fn mirror(&mut self, _: &GameConfig) {
-        *self = self.other();
-    }
-}
-
-
-#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Default)]
-#[repr(C)]
-pub struct TeamPair<T> {
-    pub a: T,
-    pub b: T,
-}
-
-impl<T> TeamPair<T> {
-    pub fn new(a: T, b: T) -> Self {
-        Self{ a, b }
-    }
-}
-
-impl<T> Index<Team> for TeamPair<T> {
-    type Output = T;
-    fn index(&self, index: Team) -> &Self::Output {
-        match index {
-            Team::A => &self.a,
-            Team::B => &self.b
-        }
-    }
-}
-
-impl<T> IndexMut<Team> for TeamPair<T> {
-    fn index_mut(&mut self, index: Team) -> &mut Self::Output {
-        match index {
-            Team::A => &mut self.a,
-            Team::B => &mut self.b
-        }
-    }
-}
-
-impl<T> IntoIterator for TeamPair<T> {
-    type Item = T;
-    type IntoIter = std::array::IntoIter<T, 2>;
-
-    fn into_iter(self) -> Self::IntoIter {
-        [self.a, self.b].into_iter()
-    }
-}
-
-impl<'a, T> IntoIterator for &'a TeamPair<T> {
-    type Item = &'a T;
-    type IntoIter = std::array::IntoIter<&'a T, 2>;
-
-    fn into_iter(self) -> Self::IntoIter {
-        [&self.a, &self.b].into_iter()
-    }
-}
-
-impl<'a, T> IntoIterator for &'a mut TeamPair<T> {
-    type Item = &'a mut T;
-    type IntoIter = std::array::IntoIter<&'a mut T, 2>;
-
-    fn into_iter(self) -> Self::IntoIter {
-        [&mut self.a, &mut self.b].into_iter()
-    }
-}
-
-impl<T> TeamPair<T> {
-    pub fn iter(&self) -> std::array::IntoIter<&T, 2> {
-        [&self.a, &self.b].into_iter()
-    }
-
-    pub fn iter_mut(&mut self) -> std::array::IntoIter<&mut T, 2> {
-        [&mut self.a, &mut self.b].into_iter()
-    }
-}
-
-impl<T> Index<Team> for PlayerArray<T> {
-    type Output = [T];
-    
-    fn index(&self, team: Team) -> &Self::Output {
-        match team {
-            Team::A => &self[..(NUM_PLAYERS as usize)],
-            Team::B => &self[(NUM_PLAYERS as usize)..]
-        }
-    }
-}
-
-impl<T> Mirror for TeamPair<T> where T: Mirror {
-    fn mirror(&mut self, conf: &GameConfig) {
-        std::mem::swap(&mut self.a, &mut self.b);
-        self.a.mirror(conf);
-        self.b.mirror(conf);
-    }
-}
-
-impl<T> IndexMut<Team> for PlayerArray<T> {
-    fn index_mut(&mut self, team: Team) -> &mut Self::Output {
-        match team {
-            Team::A => &mut self[..(NUM_PLAYERS as usize)],
-            Team::B => &mut self[(NUM_PLAYERS as usize)..]
+            StateOption::Some(t) => Some(t),
         }
     }
 }
@@ -169,229 +58,521 @@ pub trait Mirror {
     fn mirror(&mut self, conf: &GameConfig);
 }
 
-impl<T> Mirror for PlayerArray<T> where T: Mirror {
-    fn mirror(&mut self, conf: &GameConfig) {
-        self.rotate_left(NUM_PLAYERS as usize);
-        self.iter_mut().for_each(|it| it.mirror(conf));
-    }
-}
-
-impl<T> Mirror for [T; NUM_PLAYERS as usize] where T: Mirror {
+impl<T> Mirror for [T; BOTS_MAX as usize]
+where
+    T: Mirror,
+{
     fn mirror(&mut self, conf: &GameConfig) {
         self.iter_mut().for_each(|it| it.mirror(conf));
     }
 }
 
-pub fn mirror_pos(pos: &mut Vec2, conf: &GameConfig) {
-    pos.x = conf.field.width as f32 - pos.x;
-}
-
-pub fn mirror_player_id(id: &mut PlayerId) {
-    if *id < NUM_PLAYERS {
-        *id += NUM_PLAYERS;
-    } else {
-        *id -= NUM_PLAYERS;
-    }
-}
-
-impl Mirror for Vec2 {
-    fn mirror(&mut self, _: &GameConfig) {
-        self.x *= -1.0;
-    }
-}
-
-
-#[derive(Serialize, Deserialize, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+#[cfg_attr(feature = "engine", derive(Diff))]
 #[repr(C)]
-pub struct PlayerState {
-    pub id: PlayerId,
+pub struct BotState {
+    pub id: BotId,
+    pub class: BotClass,
+    pub health: f32,
     pub pos: Vec2,
-    pub dir: Vec2,
-    pub speed: f32,
-    pub radius: f32,
-    pub pickup_radius: f32,
+    pub vel: Vec2,
+    pub angle: f32,
+    pub turn_vel: f32,
+    /// Absolute tick at which the blaster is next ready. `0` means ready now. Absolute
+    /// rather than a countdown so it only changes on the tick a shot is fired -- a
+    /// per-tick counter would put every bot on cooldown into every gamelog diff.
+    pub next_fire_tick: u32,
+    /// Absolute tick at which this bot stops being invulnerable. `0` means vulnerable now.
+    /// Set when a blast lands; while it is in the future the bot takes no blaster damage,
+    /// which is also what limits a bot to one blast per tick. Absolute for the same reason
+    /// as `next_fire_tick` -- a countdown would dirty the diff of every hurt bot each tick.
+    pub invulnerable_until_tick: u32,
+    /// Impact point of this tick's shot, `None` on any tick this bot did not fire.
+    pub shot: StateOption<Vec2>,
 }
 
-impl Mirror for PlayerState {
-    fn mirror(&mut self, conf: &GameConfig) {
-        mirror_player_id(&mut self.id);
-        mirror_pos(&mut self.pos, conf);
-        self.dir.mirror(conf);
+impl Mirror for BotState {
+    fn mirror(&mut self, _conf: &GameConfig) {
+        mirror_pos(&mut self.pos);
+        mirror_vel(&mut self.vel);
+        // The world is rotated 180 degrees, so the bot's facing turns with it. `turn_vel` is
+        // a signed rotation *rate*, which a rotation preserves -- it stays as-is.
+        self.angle = normalize_degrees(self.angle - 180.0);
+        if let StateOption::Some(point) = &mut self.shot {
+            mirror_pos(point);
+        }
+        // `next_fire_tick` and `invulnerable_until_tick` are absolute ticks, so they are
+        // side-agnostic already.
     }
+}
+
+pub trait Action {
+    fn sanitize(&mut self);
+}
+
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+#[repr(C)]
+pub struct MoveAction {
+    pub direction: Vec2,
+}
+
+impl Default for MoveAction {
+    fn default() -> Self {
+        MoveAction {
+            direction: Vec2::default(),
+        }
+    }
+}
+
+impl Action for MoveAction {
+    fn sanitize(&mut self) {
+        self.direction = self.direction.normalize_or_zero();
+    }
+}
+
+impl Mirror for MoveAction {
+    fn mirror(&mut self, _conf: &GameConfig) {
+        mirror_vel(&mut self.direction);
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+#[repr(C)]
+pub enum TurnAction {
+    Direction { power: f32 }, // capped at 1.0 magnitude
+    TargetRotation { deg: f32 },
+    TargetPosition { pos: Vec2 }, // pointing towards target position
+}
+
+impl Default for TurnAction {
+    fn default() -> Self {
+        Self::Direction { power: 0.0 }
+    }
+}
+
+impl Action for TurnAction {
+    fn sanitize(&mut self) {
+        match self {
+            Self::Direction { power: rot_vel } => {
+                *rot_vel = rot_vel.clamp(-1.0, 1.0);
+            }
+            Self::TargetRotation { deg } => {
+                *deg = normalize_degrees(*deg);
+            }
+            _ => (),
+        }
+    }
+}
+
+impl Mirror for TurnAction {
+    fn mirror(&mut self, _conf: &GameConfig) {
+        match self {
+            // `power` is a signed turn *rate*, and a 180 degree rotation preserves the
+            // sense of rotation, so this is side-agnostic already.
+            Self::Direction { .. } => {}
+            Self::TargetRotation { deg } => {
+                *deg -= 180.0;
+                self.sanitize();
+            }
+            Self::TargetPosition { pos } => {
+                mirror_pos(pos);
+            }
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+#[repr(C)]
+pub enum SpecialAction {
+    // TODO work these out
+    Battle { fire: bool },
+    Healer { fire: bool, target: BotId },
+    Extractor { mine: bool },
+}
+
+impl SpecialAction {
+    pub fn class(&self) -> BotClass {
+        match self {
+            SpecialAction::Battle { .. } => BotClass::Battle,
+            SpecialAction::Healer { .. } => BotClass::Healer,
+            SpecialAction::Extractor { .. } => BotClass::Extractor,
+        }
+    }
+}
+
+impl Default for SpecialAction {
+    fn default() -> Self {
+        Self::Battle { fire: false }
+    }
+}
+
+impl Mirror for SpecialAction {
+    fn mirror(&mut self, _conf: &GameConfig) {} // NOTE for now these are side agnostic
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Default, Debug)]
 #[repr(C)]
-pub struct PlayerAction {
-    pub dir: Vec2,
-    pub pass: StateOption<Vec2>,
+pub struct BotAction {
+    pub move_action: MoveAction,
+    pub turn_action: TurnAction,
+    pub special_action: SpecialAction, // TODO
+    pub self_destruct: bool,
 }
 
-impl PlayerAction {
-    pub fn sanitize(&mut self) {
-        if !self.dir.x.is_finite() { self.dir.x = 0.0; }
-        if !self.dir.y.is_finite() { self.dir.y = 0.0; }
-        if let StateOption::Some(pass) = &mut self.pass {
-            if !pass.x.is_finite() { pass.x = 0.0; }
-            if !pass.y.is_finite() { pass.y = 0.0; }
-        }
-    }
-}
-
-impl Mirror for PlayerAction {
+impl Mirror for BotAction {
     fn mirror(&mut self, conf: &GameConfig) {
-        self.dir.mirror(conf);
-        if let StateOption::Some(ref mut pass) = self.pass {
-            pass.mirror(conf);
-        }
+        self.move_action.mirror(conf);
+        self.turn_action.mirror(conf);
+        self.special_action.mirror(conf);
     }
 }
 
-impl Mirror for u32 {
-    fn mirror(&mut self, _: &GameConfig) { }
-}
-
-pub type TeamAction = [PlayerAction; NUM_PLAYERS as usize];
-pub type PlayerArray<T> = [T; NUM_PLAYERS as usize * 2];
-
-#[derive(Serialize, Deserialize, Clone, PartialEq)]
-#[repr(u8, C)]
-pub enum BallPossessionState {
-    Possessed {
-        owner: PlayerId,
-        team: Team,
-        capture_ticks: u32,
-    }, 
-    Passing { team: Team },
-    Free
-}
-
-impl Mirror for BallPossessionState {
-    fn mirror(&mut self, conf: &GameConfig) {
-        use BallPossessionState::*;
-        match self {
-            Possessed { owner, team, .. } => {
-                mirror_player_id(owner);
-                team.mirror(conf);
-            },
-            Passing { team } => {
-                team.mirror(conf);
-            },
-            _ => ()
-        }
+impl Action for BotAction {
+    fn sanitize(&mut self) {
+        self.move_action.sanitize();
+        self.turn_action.sanitize();
     }
 }
 
-#[derive(Serialize, Deserialize, Clone, Copy, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug, Default)]
 #[repr(C)]
-pub struct BallStagnationState {
-    pub center: Vec2,
-    pub tick: u32,
+pub enum BotClass {
+    #[default]
+    Battle,
+    Healer,    // TODO
+    Extractor, // TODO
 }
 
-impl Mirror for BallStagnationState {
-    fn mirror(&mut self, conf: &GameConfig) {
-        mirror_pos(&mut self.center, conf);
-    }
-}
-
-#[derive(Serialize, Deserialize, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, PartialEq, Default, Debug)]
 #[repr(C)]
-pub struct BallState {
-    pub pos: Vec2,
-    pub vel: Vec2,
-    pub radius: f32,
+pub struct FleetAction {
+    pub bots: [BotAction; BOTS_MAX],
+    pub fabricator_next: BotClass,
+    pub fabricator_on: bool, // TODO upgrade
 }
 
-impl Mirror for BallState {
-    fn mirror(&mut self, conf: &GameConfig) {
-        mirror_pos(&mut self.pos, conf);
-        self.vel.mirror(conf);
+impl FleetAction {
+    pub fn new() -> Self {
+        let mut res: Self = Default::default();
+        res.fabricator_on = true;
+        res
     }
 }
 
-#[derive(Serialize, Deserialize, Clone, PartialEq)]
+impl Mirror for FleetAction {
+    fn mirror(&mut self, conf: &GameConfig) {
+        self.bots
+            .iter_mut()
+            .for_each(|bot_action| bot_action.mirror(conf));
+        // TODO upgrade
+        // TODO fabricator
+    }
+}
+
+impl Action for FleetAction {
+    fn sanitize(&mut self) {
+        self.bots
+            .iter_mut()
+            .for_each(|bot_action| bot_action.sanitize());
+    }
+}
+
+#[derive(Clone, PartialEq, Debug)]
 #[repr(C)]
-pub struct GameState {
-    pub tick: u32,
-    pub ball: BallState,
-    pub ball_possession: BallPossessionState,
-    pub ball_stagnation: BallStagnationState,
-    pub players: PlayerArray<PlayerState>,
-    pub score: TeamPair<u32>
+pub struct BotArray {
+    pub len: u8,
+    pub mask: [bool; BOTS_MAX],
+    pub arr: [BotState; BOTS_MAX],
 }
 
-impl Mirror for GameState {
-    fn mirror(&mut self, conf: &GameConfig) {
-        self.ball.mirror(conf);
-        self.ball_possession.mirror(conf);
-        self.ball_stagnation.mirror(conf);
-        self.players.mirror(conf);
-        self.score.mirror(conf);
-    }
-}
 
-impl GameState {
- 
-    pub fn new(conf: &GameConfig) -> Self {
-        let center = conf.field.center();
-        GameState {
-            tick: 0,
-            ball: BallState {
-                pos: center,
+impl BotArray {
+    pub fn new() -> Self {
+        BotArray {
+            len: 0,
+            mask: [false; BOTS_MAX],
+            arr: std::array::from_fn(|i: usize| BotState {
+                id: i as u8,
+                class: BotClass::Battle,
+                health: 0.0,
+                pos: Vec2::ZERO,
                 vel: Vec2::ZERO,
-                radius: conf.ball.radius,
-            },
-            ball_possession: BallPossessionState::Free,
-            ball_stagnation: BallStagnationState {
-                center,
-                tick: 0
-            },
-            players: std::array::from_fn(|i| PlayerState {
-                id: i as u32,
-                pos: center,
-                dir: Vec2::ZERO,
-                speed: conf.player.speed,
-                radius: conf.player.radius,
-                pickup_radius: conf.player.pickup_radius
+                angle: 0.0,
+                turn_vel: 0.0,
+                next_fire_tick: 0,
+                invulnerable_until_tick: 0,
+                shot: StateOption::None,
             }),
-            score: TeamPair { a: 0, b: 0 }
         }
     }
 
-    #[inline(always)]
-    pub fn is_ball_free(&self) -> bool {
-        matches!(self.ball_possession, BallPossessionState::Free)
+    // panics on invalid inputs
+    pub fn remove(&mut self, id: BotId) {
+        let id = id as usize;
+        assert!(self.mask[id]);
+        self.len -= 1;
+        self.mask[id] = false;
     }
 
-    #[inline(always)]
-    pub fn ball_owner(&self) -> Option<PlayerId> {
-        if let BallPossessionState::Possessed { owner, .. } = self.ball_possession {
-            Some(owner)
+    // panics on full array
+    pub fn add(&mut self) -> BotId {
+        let id = self.mask.iter().position(|bit| !bit).expect("cannot add new bot to full array");
+        self.mask[id] = true;
+        self.len += 1;
+        id as BotId
+    }
+
+    pub fn iter<'a>(&'a self) -> BotArrayIter<'a> {
+        BotArrayIter {
+            bot_slice: &self.arr,
+            mask_slice: &self.mask,
+        }
+    }
+
+    pub fn iter_mut<'a>(&'a mut self) -> BotArrayIterMut<'a> {
+        BotArrayIterMut {
+            bot_slice: &mut self.arr,
+            mask_slice: &mut self.mask,
+        }
+    }
+
+    pub fn get<'a>(&'a self, id: BotId) -> Option<&'a BotState> {
+        let id = id as usize;
+        return if id < BOTS_MAX && self.mask[id] {
+            Some(&self.arr[id])
         } else {
             None
-        }
+        };
+    }
+
+    pub fn get_mut<'a>(&'a mut self, id: BotId) -> Option<&'a mut BotState> {
+        let id = id as usize;
+        return if id < BOTS_MAX && self.mask[id] {
+            Some(&mut self.arr[id])
+        } else {
+            None
+        };
     }
 
     #[inline(always)]
-    pub fn player_team(&self, id: PlayerId) -> Option<Team> {
-        if id < NUM_PLAYERS {
-            Some(Team::A)
-        } else if id < NUM_PLAYERS * 2 {
-            Some(Team::B)
-        } else {
-            None
-        }
-    }
-
-    pub fn teams<'a>(&'a self) -> TeamPair<&'a [PlayerState]> {
-        let (a, b) = self.players.split_at(NUM_PLAYERS as usize);
-        TeamPair { a, b }
-    }
-    
-    pub fn teams_mut<'a>(&'a mut self) -> TeamPair<&'a mut [PlayerState]> {
-        let (a, b) = self.players.split_at_mut(NUM_PLAYERS as usize);
-        TeamPair { a, b }
+    pub fn is_full(&self) -> bool {
+        self.len as usize == BOTS_MAX
     }
 }
 
+impl Serialize for BotArray {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer {
+        self.iter().collect::<Vec<_>>().serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for BotArray {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de> {
+        let vec = Vec::<BotState>::deserialize(deserializer)?;
+        let mut res = BotArray::new();
+        res.len = vec.len() as u8;
+        for bot in vec {
+            res[bot.id] = bot.clone();
+            res.mask[bot.id as usize] = true;
+        }
+        Ok(res)
+    }
+}
+
+impl Index<BotId> for BotArray {
+    type Output = BotState;
+
+    fn index(&self, id: BotId) -> &Self::Output {
+        let id = id as usize;
+        if id >= BOTS_MAX || !self.mask[id] {
+            panic!("attempted to access invalid bot id: {}", id);
+        }
+        &self.arr[id]
+    }
+}
+
+impl IndexMut<BotId> for BotArray {
+    fn index_mut(&mut self, id: BotId) -> &mut Self::Output {
+        let id = id as usize;
+        if id >= BOTS_MAX || !self.mask[id] {
+            panic!("attempted to access invalid bot id: {}", id);
+        }
+        &mut self.arr[id]
+    }
+}
+
+pub struct BotArrayIter<'a> {
+    bot_slice: &'a [BotState],
+    mask_slice: &'a [bool],
+}
+
+impl<'a> Iterator for BotArrayIter<'a> {
+    type Item = &'a BotState;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let bot_slice = std::mem::take(&mut self.bot_slice);
+        let mask_slice = std::mem::take(&mut self.mask_slice);
+
+        if let Some(pos) = mask_slice.iter().position(|b| *b) {
+            let (bot_head, bot_tail) = bot_slice.split_at(pos + 1);
+            let (_, mask_tail) = mask_slice.split_at(pos + 1);
+            self.bot_slice = bot_tail;
+            self.mask_slice = mask_tail;
+
+            bot_head.last()
+        } else {
+            return None;
+        }
+    }
+}
+
+pub struct BotArrayIterMut<'a> {
+    bot_slice: &'a mut [BotState],
+    mask_slice: &'a [bool],
+}
+
+impl<'a> Iterator for BotArrayIterMut<'a> {
+    type Item = &'a mut BotState;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let bot_slice = std::mem::take(&mut self.bot_slice);
+        let mask_slice = std::mem::take(&mut self.mask_slice);
+
+        if let Some(pos) = mask_slice.iter().position(|b| *b) {
+            let (bot_head, bot_tail) = bot_slice.split_at_mut(pos + 1);
+            let (_, mask_tail) = mask_slice.split_at(pos + 1);
+            self.bot_slice = bot_tail;
+            self.mask_slice = mask_tail;
+
+            bot_head.last_mut()
+        } else {
+            return None;
+        }
+    }
+}
+
+impl Mirror for BotArray {
+    fn mirror(&mut self, conf: &GameConfig) {
+        for bot in self.iter_mut() {
+            bot.mirror(conf);
+        }
+    }
+}
+
+// Team naming is rewritten per build -- see `mm_macros::teams` and `game::team`.
+#[cfg_attr(feature = "engine", mm_macros::teams(A, B))]
+#[cfg_attr(feature = "client", mm_macros::teams(Me, Other))]
+mod game_state_impl {
+    #[derive(Serialize, Deserialize, Clone, PartialEq)]
+    #[cfg_attr(feature = "engine", derive(Diff))]
+    #[repr(C)]
+    pub struct GameState {
+        pub tick: u32,
+        pub capture: f32,
+        #[cfg_attr(feature = "engine", diff(nested))]
+        pub fleet_team_a: BotArray,
+        #[cfg_attr(feature = "engine", diff(nested))]
+        pub fleet_team_b: BotArray,
+    }
+
+    impl Mirror for GameState {
+        fn mirror(&mut self, conf: &GameConfig) {
+            self.fleet_team_a.mirror(conf);
+            self.fleet_team_b.mirror(conf);
+            std::mem::swap(&mut self.fleet_team_a, &mut self.fleet_team_b);
+            self.capture *= -1.0;
+            // The map is not here to mirror: it lives in `GameConfig`, and it is invariant
+            // under this rotation by construction -- see `config::MAP` and
+            // `config::wall_test::the_map_is_mirror_symmetric`.
+        }
+    }
+
+    impl GameState {
+        pub fn new(_conf: &GameConfig) -> Self {
+            Self {
+                tick: 0,
+                capture: 0.0,
+                fleet_team_a: BotArray::new(),
+                fleet_team_b: BotArray::new(),
+            }
+        }
+
+        /// Center of the payload circle. Its radius is `conf.payload.radius`.
+        pub fn payload_pos(&self) -> Vec2 {
+            payload_position(self.capture)
+        }
+
+        pub fn fleets(&self) -> TeamPair<&BotArray> {
+            TeamPair {
+                team_a: &self.fleet_team_a,
+                team_b: &self.fleet_team_b,
+            }
+        }
+
+        pub fn fleets_mut(&mut self) -> TeamPair<&mut BotArray> {
+            TeamPair {
+                team_a: &mut self.fleet_team_a,
+                team_b: &mut self.fleet_team_b,
+            }
+        }
+    }
+}
+
+#[cfg(feature = "engine")]
+#[cfg(test)]
+mod state_test {
+    use super::*;
+    use crate::game::config::BOTS_MAX;
+
+    fn ensure_valid_bot_array(bot_array: &BotArray) {
+        let mut len = 0;
+        for i in 0..BOTS_MAX {
+            if !bot_array.mask[i] {
+                continue;
+            }
+
+            let bot_id = bot_array.arr[i].id as usize;
+            assert_eq!(bot_id, i);
+
+            len += 1;
+        }
+
+        assert_eq!(bot_array.len, len);
+    }
+
+    #[test]
+    fn test_bot_array() {
+        let mut bot_array = BotArray::new();
+        ensure_valid_bot_array(&bot_array);
+        for _ in 0..3 {
+            bot_array.add();
+        }
+        ensure_valid_bot_array(&bot_array);
+
+        bot_array.remove(1);
+        ensure_valid_bot_array(&bot_array);
+
+        assert!(matches!(bot_array.get(1), None));
+        assert!(matches!(bot_array.get(0), Some(_)));
+
+        assert_eq!(bot_array.len, 2);
+        assert_eq!(bot_array.add(), 1);
+        assert_eq!(bot_array.len, 3);
+
+        bot_array.remove(1);
+
+        let valid_ids = bot_array.iter().map(|bot| bot.id).collect::<Vec<_>>();
+        assert_eq!(valid_ids, vec![0, 2]);
+
+        bot_array.remove(0);
+        bot_array.remove(2);
+
+        for _ in bot_array.iter() {
+            panic!("iter is iterating empty bot array")
+        }
+    }
+}

@@ -3,6 +3,22 @@ use std::ops::{ Add, AddAssign, Sub, SubAssign, Mul, MulAssign, Div, DivAssign, 
 
 pub use std::f32::consts::PI;
 
+#[inline(always)]
+pub fn normalize_degrees(deg: f32) -> f32 {
+    ((deg % 360.0) + 360.0) % 360.0
+}
+
+pub fn diff_degrees(a: f32, b: f32) -> f32 {
+    let clockwise_diff = normalize_degrees(a - b);
+    let counter_diff = normalize_degrees(b - a);
+    if clockwise_diff <= counter_diff {
+        clockwise_diff
+    } else {
+        -counter_diff
+    }
+}
+
+
 #[derive(Serialize, Deserialize, Clone, PartialEq, Copy, Debug)]
 #[repr(C)]
 pub struct Vec2 {
@@ -26,7 +42,7 @@ impl Vec2 {
     }
 
     #[inline(always)]
-    pub fn new(x: f32, y: f32) -> Self {
+    pub const fn new(x: f32, y: f32) -> Self {
         Vec2 { x, y }
     }
 

@@ -3,6 +3,7 @@
 
   inputs = {
     flake-parts.url = "github:hercules-ci/flake-parts";
+    claude.url = "github:sadjow/claude-code-nix";
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
   };
 
@@ -25,6 +26,7 @@
         devShells.default = pkgs.mkShell {
           packages = with pkgs; [
             cargo
+            inputs.claude.packages.${system}.default
           ];
         };
       };
