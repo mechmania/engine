@@ -8,8 +8,13 @@
 //! ```
 //!
 //! generates, for each `Name: (Request, Response)` pair, a `NameProtocol` marker type
-//! implementing the `Protocol` trait, a pair of `Frame` variants, and an `on_name`
-//! handler slot in `Handlers`.
+//! implementing the `Protocol` trait and a pair of `Frame` variants.
+//!
+//! It deliberately generates no dispatch layer. There used to be a `Handlers` struct of
+//! boxed closures, one slot per protocol, but both sides now read and write a payload at
+//! `Frame::PAYLOAD_OFFSET` directly (`ipc::EngineChannel::request`, and `BotChannel`'s
+//! `handshake`/`await_tick`/`respond`) -- a closure table in between bought nothing and
+//! could not be split across an FFI boundary with Python in the middle.
 //!
 //! `Frame` is the type that is literally memcpy'd into the mapping, and the reader on
 //! the other side identifies a frame by reading its first byte -- its tag -- and
@@ -27,7 +32,6 @@ use syn::{
     Ident, Token, Type,
 };
 
-use crate::teams::snake_case;
 
 /// One `Name: (Request, Response)` entry.
 pub(crate) struct ProtocolDef {
@@ -128,35 +132,21 @@ pub(crate) fn expand(protocols: Protocols) -> syn::Result<TokenStream> {
         }
     });
 
-    let handler_fields = defs.iter().map(|d| {
-        let handler = format_ident!("on_{}", snake_case(&d.name.to_string()));
-        let request = &d.request;
-        let response = &d.response;
-        quote! {
-            pub #handler: ::std::boxed::Box<dyn Fn(&#request) -> #response>,
-        }
-    });
+    // Every payload type, in tag order, for `PAYLOAD_OFFSET` and `size_for_tag`.
+    let payload_align_tys = defs
+        .iter()
+        .flat_map(|d| [d.request.clone(), d.response.clone()])
+        .collect::<Vec<_>>();
 
-    let handler_arms = defs.iter().map(|d| {
-        let handler = format_ident!("on_{}", snake_case(&d.name.to_string()));
-        let request_variant = format_ident!("{}Request", d.name);
-        let response_variant = format_ident!("{}Response", d.name);
-        quote! {
-            Frame::#request_variant(request) => {
-                Frame::#response_variant((self.#handler)(request))
-            }
-        }
-    });
-
-    let response_arms = defs.iter().map(|d| {
-        let response_variant = format_ident!("{}Response", d.name);
-        quote! {
-            Frame::#response_variant(_) => panic!(concat!(
-                "engine sent a ",
-                stringify!(#response_variant),
-                ", which is a response and not a request",
-            )),
-        }
+    let size_arms = defs.iter().enumerate().flat_map(|(i, d)| {
+        let request_tag = (i * 2) as u8;
+        let response_tag = (i * 2 + 1) as u8;
+        let request = d.request.clone();
+        let response = d.response.clone();
+        [
+            quote! { #request_tag => Self::PAYLOAD_OFFSET + ::core::mem::size_of::<#request>(), },
+            quote! { #response_tag => Self::PAYLOAD_OFFSET + ::core::mem::size_of::<#response>(), },
+        ]
     });
 
     // `defs.len()` protocols means tags `0 ..= 2 * len - 1`; anything wider than a `u8`
@@ -172,8 +162,12 @@ pub(crate) fn expand(protocols: Protocols) -> syn::Result<TokenStream> {
 
         pub trait Protocol {
             const ID: ProtocolId;
-            type Request;
-            type Response;
+            // Both sides copy a payload in and out of the mapping by value, so the payload
+            // types carry the bound rather than every call site repeating it.
+            type Request: Clone + crate::game::mirror::LayoutHash;
+            // The response is the direction that crosses *into* the engine from a process
+            // it does not control, so it carries the validator as well.
+            type Response: Clone + crate::game::mirror::LayoutHash + crate::game::mirror::Validate;
             fn request_into_frame(request: Self::Request) -> Frame;
             fn response_into_frame(response: Self::Response) -> Frame;
             fn frame_into_request(frame: Frame) -> Self::Request;
@@ -199,17 +193,53 @@ pub(crate) fn expand(protocols: Protocols) -> syn::Result<TokenStream> {
             "too many protocols: the tag must fit in the single leading byte",
         );
 
-        pub struct Handlers {
-            #(#handler_fields)*
-        }
+        impl Frame {
+            /// Byte offset of a variant's payload within a `Frame`.
+            ///
+            /// Uniform across variants: `#[repr(u8, C)]` lays the enum out as a `#[repr(C)]`
+            /// struct of the tag byte followed by a union of the variants' fields, so every
+            /// payload starts at the same place -- the tag padded up to the greatest
+            /// alignment any payload requires.
+            pub const PAYLOAD_OFFSET: usize = {
+                let mut align = 1usize;
+                #(
+                    if ::core::mem::align_of::<#payload_align_tys>() > align {
+                        align = ::core::mem::align_of::<#payload_align_tys>();
+                    }
+                )*
+                align
+            };
 
-        impl Handlers {
-            pub fn respond(&self, frame: &Frame) -> Frame {
-                match frame {
-                    #(#handler_arms)*
-                    #(#response_arms)*
+            /// A hash of the measured layout of every payload that crosses this channel,
+            /// in tag order -- the whole wire closure, since each payload type's own hash
+            /// folds in its fields' types recursively.
+            ///
+            /// This is what makes a version skew loud. `mm-cli` pins one `mm-engine` git
+            /// rev and a starterpack pins another; two builds that disagree about a struct
+            /// disagree here, and the handshake says so instead of reading garbage for a
+            /// whole match. Deriving it from the protocol list rather than a hand-written
+            /// set of types means a new protocol extends it automatically.
+            pub const LAYOUT_HASH: u64 = {
+                let mut hash = crate::game::mirror::HASH_BASIS;
+                #(
+                    hash = crate::game::mirror::mix(
+                        hash,
+                        <#payload_align_tys as crate::game::mirror::LayoutHash>::HASH,
+                    );
+                )*
+                hash
+            };
+
+            /// How many bytes the frame carrying `tag` actually occupies. `size_of::<Frame>()`
+            /// is the *largest* variant, so copying that for every message would make the
+            /// cheapest protocol pay for the dearest one.
+            pub const fn size_for_tag(tag: u8) -> usize {
+                match tag {
+                    #(#size_arms)*
+                    _ => ::core::mem::size_of::<Self>(),
                 }
             }
         }
+
     })
 }

@@ -5,17 +5,36 @@ pub const EPSILON: f32 = 0.001;
 pub const COLLISION_MAX_ITERATIONS: u32 = 100;
 pub const BOTS_MAX: usize = 32;
 pub const MAP_SIZE: usize = 32;
-pub const DEPOSITS_MAX: usize = 8;
 
-pub const PAYLOAD_PATH_LEN: usize = 5;
+/// Every bot's radius. Named because more than the `BotConfig` default depends on it: the
+/// navigation graph in `game::topology` is a function of it, and so is whether a given
+/// corridor is a corridor at all.
+pub const BOT_RADIUS: f32 = 0.25;
+
+pub const PAYLOAD_PATH_LEN: usize = 7;
+
+/// How many levels an upgradeable stat has, level 0 -- the base value -- included. A stat
+/// therefore tops out at `UPGRADE_LEVELS - 1`, and a fleet can buy `UPGRADE_LEVELS - 1`
+/// levels of it.
+pub const UPGRADE_LEVELS: usize = 5;
+
+/// Team A's deposit. Team B's is this point's `mirror_pos` image, `(9.0, 2.0)` -- only
+/// half the layout is written for the same reason only half of `MAP_ART` is.
+///
+/// Team A's half is the *high* half, `y = 16..31` -- that is where `build_map` puts
+/// `MAP_ART` and where `eval_tick` spawns A -- so this sits in the pocket the art draws
+/// with its `#####` at `x = 25..29` and its column at `x = 20`.
+pub const DEPOSIT_POS: Vec2 = Vec2::new(23.0, 30.0);
 
 // Represents the path from center to B
 pub const PAYLOAD_PATH: [Vec2; PAYLOAD_PATH_LEN] = [
     Vec2::new(16.0, 16.0),
-    Vec2::new(5.0, 16.0),
-    Vec2::new(5.0, 8.0),
-    Vec2::new(27.0, 8.0),
-    Vec2::new(27.0, 4.0),
+    Vec2::new(23.0, 16.0),
+    Vec2::new(23.0, 11.0),
+    Vec2::new(9.0, 11.0),
+    Vec2::new(9.0, 6.0),
+    Vec2::new(23.0, 6.0),
+    Vec2::new(23.0, 3.0),
 ];
 
 pub fn mirror_pos(pos: &mut Vec2) {
@@ -59,7 +78,7 @@ pub fn payload_position(t: f32) -> Vec2 {
     pos
 }
 
-#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug, Default)]
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug, Default, mm_macros::FfiMirror)]
 #[repr(u8)]
 pub enum MapTile {
     #[default]
@@ -71,70 +90,58 @@ pub enum MapTile {
 // square [x, x + 1) x [y, y + 1).
 pub type Map = [[MapTile; MAP_SIZE]; MAP_SIZE];
 
-/// How close a wall is allowed to get to the payload's path. Equal to the payload radius,
-/// so the payload never clips a wall -- but only just, so a bot escorting it can be pinched
-/// against one. Nothing enforces this at runtime; `wall_test::no_wall_blocks_the_payload`
-/// asserts it against the hand-written layout below.
-pub const WALL_PAYLOAD_CLEARANCE: f32 = 1.5;
-
-/// The arena, hand-written. `#` is a wall, anything else is empty.
+/// The arena's bottom half -- team A's side -- hand-written. `#` is a wall, anything else is
+/// empty.
 ///
-/// Rows read top-down -- the first line is `y = MAP_SIZE - 1` -- so this table is a picture
-/// of the map as the visualizer draws it, not as `MAP` indexes it. `build_map` does the flip.
+/// Rows read top-down -- the first line is `y = MAP_SIZE / 2` -- so this table is a picture
+/// of the map exactly as the visualizer draws it: team A's half is the *high* half, and the
+/// visualizer's `+y` points down the screen, so art row `r` is world row `MAP_SIZE / 2 + r`
+/// and the last line is the bottom edge of the arena.
 ///
-/// The layout is invariant under the 180 degree rotation `mirror_pos` applies, which is what
-/// lets `GameState::mirror` leave it alone; `wall_test::the_map_is_mirror_symmetric` checks
-/// that. Edit this and re-run `cargo test -- --nocapture render_map`.
-const MAP_ART: [&[u8; MAP_SIZE]; MAP_SIZE] = [
-    b"..........#####.................", // y = 31
-    b"..........#####....#####........",
-    b"..........#####....#####........",
-    b"..........#####....#####........",
-    b"...................#####........", // y = 27
-    b"................................",
-    b"................................",
-    b"................................",
-    b"................................",
-    b"................................", // y = 22
-    b".......................##.......",
-    b".......................##.......",
-    b"................................", // y = 19
-    b"................................",
-    b"................................",
-    b"................................",
-    b"................................",
-    b"................................", // y = 14
-    b"................................",
-    b"................................", // y = 12
-    b".......##.......................",
-    b".......##.......................", // y = 10
-    b"................................",
-    b"................................",
-    b"................................",
-    b"................................", // y = 6
-    b"................................",
-    b"........#####...................", // y = 4
-    b"........#####....#####..........",
-    b"........#####....#####..........",
-    b"........#####....#####..........", // y = 1
-    b".................#####..........", // y = 0
+/// Only this half is written: `build_map` rotates it 180 degrees about the map centre to make
+/// team B's half, so the layout is invariant under the rotation `mirror_pos` applies by
+/// construction, which is what lets `GameState::mirror` leave the map alone. Edit this and
+/// re-run `cargo test -- --nocapture render_graph` to see the whole arena, walls and
+/// navigation vertices together.
+const MAP_ART: [&[u8; MAP_SIZE]; MAP_SIZE / 2] = [
+    b"####........................####", // y = 16
+    b"......#..................#......",
+    b"......#....###############......",
+    b"......#..................#......", // y = 19
+    b"......#..................#......",
+    b"......#..................#......", // y = 21
+    b"......#..................#......",
+    b"....#################....#......",
+    b".........................#......",
+    b".........................#......", // y = 25
+    b"#........................#......",
+    b".........................#......", // y = 27
+    b"....................#....#####..",
+    b".##.................#...........",
+    b"..#.................#...........", // y = 30
+    b".....#..........................", // y = 31
 ];
 
-/// Transcribes `MAP_ART` into `Map`. Pure index arithmetic -- the layout itself is the art.
+/// Transcribes `MAP_ART` into `Map`, writing each wall twice: once where the art puts it and
+/// once at its 180 degree image, which fills in the half the art does not spell out. Pure
+/// index arithmetic -- the layout itself is the art.
 const fn build_map() -> Map {
     let mut map = [[MapTile::Empty; MAP_SIZE]; MAP_SIZE];
-    let mut y = 0;
-    while y < MAP_SIZE {
-        // row 0 of the art is the top of the map
-        let row = MAP_ART[MAP_SIZE - 1 - y];
+    let mut r = 0;
+    while r < MAP_SIZE / 2 {
+        let row = MAP_ART[r];
         let mut x = 0;
         while x < MAP_SIZE {
             if row[x] == b'#' {
-                map[x][y] = MapTile::Wall;
+                // Art row `r` goes in verbatim at `y = MAP_SIZE / 2 + r`: team A's half is
+                // the *high* half, and `+y` is down on screen, so the art reads as drawn.
+                map[x][MAP_SIZE / 2 + r] = MapTile::Wall;
+                // ...and its 180 degree image fills team B's half.
+                map[MAP_SIZE - 1 - x][MAP_SIZE / 2 - 1 - r] = MapTile::Wall;
             }
             x += 1;
         }
-        y += 1;
+        r += 1;
     }
     map
 }
@@ -152,47 +159,124 @@ pub const MAP: Map = build_map();
 //     pub possession_slowdown: f32,
 // }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+/// One upgradeable stat: every value it can take, and what a level of it costs.
+///
+/// The table *is* the stat -- there is no separate `base_` field. `value[0]` is what the
+/// stat was before anyone spent a token, so a fleet that never upgrades plays exactly as it
+/// did before upgrades existed.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, mm_macros::FfiMirror)]
+#[repr(C)]
+pub struct StatUpgrade {
+    /// `value[n]` is the stat at level `n`. Nothing requires the table to be increasing:
+    /// `blaster_cooldown` counts down, since a shorter cooldown is the better stat.
+    pub value: [f32; UPGRADE_LEVELS],
+    /// Buying level `n` costs `cost * n`, so successive levels of one stat get steadily
+    /// more expensive and maxing it costs `cost * (UPGRADE_LEVELS * (UPGRADE_LEVELS - 1) / 2)`.
+    pub cost: f32,
+}
+
+impl StatUpgrade {
+    /// The stat at `level`, clamped to the table -- a level past the end reads as the max.
+    pub fn at(&self, level: u8) -> f32 {
+        self.value[(level as usize).min(UPGRADE_LEVELS - 1)]
+    }
+
+    /// Price of moving from `level` to `level + 1`, `None` once the stat is maxed.
+    pub fn cost_of(&self, level: u8) -> Option<f32> {
+        let next = level as usize + 1;
+        if next >= UPGRADE_LEVELS {
+            None
+        } else {
+            Some(self.cost * next as f32)
+        }
+    }
+}
+
+/// The fabricator's own knobs. The stats it sells live on `BotConfig` as `StatUpgrade`s;
+/// this is what it costs to run the thing.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, mm_macros::FfiMirror)]
+#[repr(C)]
+pub struct FabricatorConfig {
+    /// Ticks between natural builds. A natural build is free -- this cadence is the
+    /// income-independent trickle that keeps a wiped fleet from being unable to rebuild.
+    pub interval: u32,
+    /// Flat token price of a rush order, which builds a bot on the spot regardless of the
+    /// timer. Flat rather than scaling: the timer already bounds how fast bodies arrive,
+    /// since at most one bot per fleet enters per tick.
+    pub rush_cost: f32,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, mm_macros::FfiMirror)]
 #[repr(C)]
 pub struct BotConfig {
-    pub radius: f32, 
-    pub base_speed: f32,
-    pub base_health: f32,
-    pub base_turn_speed: f32,
-    pub base_blaster_cooldown: u32, // ticks
+    pub radius: f32,
+    pub speed: StatUpgrade,
+    pub health: StatUpgrade,
+    pub turn_speed: StatUpgrade,
+    /// Ticks between shots. Read as `.at(level) as u32` -- one float table type beats a
+    /// second integer flavour of `StatUpgrade` for the sake of one stat.
+    pub blaster_cooldown: StatUpgrade,
+    pub blaster_range: StatUpgrade,
+    pub blaster_damage: StatUpgrade,
+    /// Health per tick one healer restores to its target. Continuous while the healer
+    /// channels -- there is no heal cooldown, so `next_fire_tick` stays blaster-only.
+    pub heal_per_tick: StatUpgrade,
+    /// Tokens one extractor adds to its fleet each tick it holds an extraction slot.
+    pub extract_rate: StatUpgrade,
+
+    // Everything below is fixed. `base_` marks a per-bot stat that simply has no upgrade;
+    // a name without it is a rule of the game rather than a stat at all.
     /// Ticks of invulnerability granted by taking a blast, counted from the tick of the
     /// hit. Also what makes a bot take at most one blast per tick.
     pub base_invulnerability_ticks: u32,
-    pub base_blaster_range: f32,
-    pub base_blaster_damage: f32,
     /// Measured from the blast point to a bot's *hull*, not its center.
     pub base_blaster_splash_radius: f32,
+    /// Healer-to-target reach, measured center to center -- unlike the blaster's splash,
+    /// which measures to the hull.
+    pub base_heal_range: f32,
+    /// Full arc width in degrees. The target must lie within half of this of the healer's
+    /// facing, which is what gives `angle` a job on a class that names its target by id.
+    pub base_heal_arc_deg: f32,
+    /// How many healers' worth of healing one bot can receive per tick, in total. A
+    /// *multiple* of the fleet's current `heal_per_tick` rather than a flat ceiling, so
+    /// "three healers stack, a fourth is wasted" stays true at every upgrade level instead
+    /// of a heal-rate upgrade quietly eating itself against a fixed cap. Not `base_` --
+    /// this is a rule, not an upgradeable stat.
+    pub heal_stack_cap: f32,
+    /// How far an extractor's ray reaches. Only walls and the map boundary block it --
+    /// neither bots nor the payload do, so an extractor can mine through a crowd.
+    pub base_extract_range: f32,
 }
 
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, mm_macros::FfiMirror)]
 #[repr(C)]
 pub struct PayloadConfig {
     pub radius: f32,
     /// A bot pushes the payload if its *center* is within this of the payload center.
     pub capture_radius: f32,
-    /// World units per tick, per bot of advantage beyond `contest_diff`.
-    pub speed_per_bot: f32,
-    /// Cap on the per-tick push, in world units.
-    pub max_speed: f32,
-    /// `d`: the payload is contested while `|n_a - n_b| <= contest_diff`.
-    pub contest_diff: u8,
+    /// World units per tick
+    pub speed: f32,
 }
 
-/// A resource deposit. Static for the whole match, hence config and not state.
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Default)]
+/// The static half of the deposits. The mutable half -- who is currently extracting --
+/// lives in `GameState` as `state::Deposit`.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, mm_macros::FfiMirror)]
 #[repr(C)]
-pub struct Deposit {
+pub struct DepositConfig {
+    /// Team A's deposit, normally `DEPOSIT_POS`. Team B's is its `mirror_pos` image, so
+    /// only this one is carried -- the same reason `payload_path` carries only half the
+    /// route. `GameState` holds both positions outright; this copy is here so a consumer
+    /// reading only the log's config line still knows the layout.
     pub pos: Vec2,
     pub radius: f32,
+    /// Extraction slots per deposit, shared by both teams -- a team that fills all of them
+    /// locks the other out until its bots die, stop mining or look away. Not `base_`: this
+    /// is a rule, not an upgradeable stat.
+    pub extractor_cap: u8,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, mm_macros::FfiMirror)]
 #[repr(C)]
 pub struct GameConfig {
     pub max_ticks: u32,
@@ -204,21 +288,18 @@ pub struct GameConfig {
     /// visualizer, and the Python and Java ports -- get it from the log's config line
     /// instead of hand-copying the waypoints.
     pub payload_path: [Vec2; PAYLOAD_PATH_LEN],
-    // `deposits[..deposit_count]` are live; the rest are padding. A fixed array because
-    // `GameConfig` is embedded in `HandshakeRequest` and crosses shared memory as raw
-    // `#[repr(C)]` bytes, so it cannot hold a `Vec`.
-    pub deposit_count: u8,
-    pub deposits: [Deposit; DEPOSITS_MAX],
+    pub deposit: DepositConfig,
+    pub fabricator: FabricatorConfig,
     /// The arena's static wall layout -- normally `MAP`. Here rather than in `GameState`
     /// because it never changes: a `GameState` is cloned twice per tick, and this is 1 KiB.
+    ///
+    /// The navigation graph derived from this map is deliberately *not* here -- it is a
+    /// third of a megabyte, the engine never reads it, and a bot builds its own from these
+    /// tiles at handshake. See `game::topology::init_topology`.
     pub map: Map,
 }
 
 impl GameConfig {
-    pub fn deposits(&self) -> &[Deposit] {
-        &self.deposits[..self.deposit_count as usize]
-    }
-
     /// Whether tile `(x, y)` is solid. Anything off the grid is not -- the map boundary is
     /// a separate thing, handled by `geom::ray_boundary` and `action::handle_collision`.
     pub fn is_wall(&self, x: isize, y: isize) -> bool {
@@ -230,148 +311,87 @@ impl GameConfig {
     }
 }
 
+/// The shipped arena as a whole `GameConfig`, shared by every test that needs one.
+///
+/// Deliberately one literal rather than one per test module: adding a `BotConfig` or
+/// `PayloadConfig` field already breaks every `GameConfig` literal in the crate at once,
+/// and each extra copy is another place to fix it. Lives here rather than in a test
+/// module so `topology`'s tests and `ffi`'s can both reach it -- they never compile
+/// under the same feature set.
 #[cfg(test)]
-mod wall_test {
+pub(crate) mod test_conf {
     use super::*;
+    use crate::game::topology::{init_topology, point_free};
+    use crate::game::util::Vec2;
+    use std::sync::OnceLock;
 
-    /// Nearest point of tile `(x, y)`'s square to `p`.
-    fn nearest_in_tile(x: usize, y: usize, p: Vec2) -> Vec2 {
-        Vec2::new(
-            p.x.clamp(x as f32, x as f32 + 1.0),
-            p.y.clamp(y as f32, y as f32 + 1.0),
-        )
+    /// The shipped arena and the shipped radius. Built once -- an O(V^3) solve per test
+    /// would make this module the slowest thing in the suite for no benefit.
+    pub(crate) fn conf() -> &'static GameConfig {
+        static CONF: OnceLock<GameConfig> = OnceLock::new();
+        init_topology(&MAP, BOT_RADIUS);
+        CONF.get_or_init(|| GameConfig {
+            max_ticks: 7200,
+            bot: BotConfig {
+                radius: BOT_RADIUS,
+                speed: StatUpgrade { value: [0.05 as f32; UPGRADE_LEVELS], cost: 0.0 },
+                health: StatUpgrade { value: [10.0 as f32; UPGRADE_LEVELS], cost: 0.0 },
+                turn_speed: StatUpgrade { value: [3.0 as f32; UPGRADE_LEVELS], cost: 0.0 },
+                blaster_cooldown: StatUpgrade { value: [60 as f32; UPGRADE_LEVELS], cost: 0.0 },
+                base_invulnerability_ticks: 15,
+                blaster_range: StatUpgrade { value: [10.0 as f32; UPGRADE_LEVELS], cost: 0.0 },
+                blaster_damage: StatUpgrade { value: [3.0 as f32; UPGRADE_LEVELS], cost: 0.0 },
+                base_blaster_splash_radius: 0.3,
+                heal_per_tick: StatUpgrade { value: [0.05 as f32; UPGRADE_LEVELS], cost: 0.0 },
+                base_heal_range: 3.0,
+                base_heal_arc_deg: 90.0,
+                heal_stack_cap: (0.15) / (0.05),
+                base_extract_range: 5.0,
+                extract_rate: StatUpgrade { value: [0.1 as f32; UPGRADE_LEVELS], cost: 0.0 },
+            },
+            payload: PayloadConfig {
+                radius: 0.75,
+                capture_radius: 2.5,
+                speed: 0.02,
+            },
+            payload_path: PAYLOAD_PATH,
+            deposit: DepositConfig {
+                // Far off the map with no radius: these tests are not about deposits, and
+                // a deposit at the real `DEPOSIT_POS` would be a solid circle in the way.
+                pos: Vec2::new(-100.0, -100.0),
+                radius: 0.0,
+                extractor_cap: 16,
+            },
+            fabricator: FabricatorConfig { interval: 100, rush_cost: 10.0 },
+            map: MAP,
+        })
     }
 
-    /// Every position the payload passes through, densely enough that consecutive samples
-    /// are far closer together than a tile.
-    fn payload_samples() -> Vec<Vec2> {
-        let steps = (payload_path_len() * 20.0) as i32;
-        (-steps..=steps)
-            .map(|i| payload_position(i as f32 / steps as f32))
-            .collect()
-    }
-
-    /// Tiles the payload's own disc sweeps over, plus `WALL_PAYLOAD_CLEARANCE` of margin.
-    fn corridor() -> [[bool; MAP_SIZE]; MAP_SIZE] {
-        let mut inside = [[false; MAP_SIZE]; MAP_SIZE];
-        for p in payload_samples() {
-            for x in 0..MAP_SIZE {
-                for y in 0..MAP_SIZE {
-                    if nearest_in_tile(x, y, p).dist(&p) < WALL_PAYLOAD_CLEARANCE {
-                        inside[x][y] = true;
-                    }
-                }
-            }
-        }
-        inside
-    }
-
-    /// `GameState::mirror` does not touch the map, on the grounds that a 180 degree
-    /// rotation maps this layout onto itself. If that ever stops holding, team B sees a
-    /// different arena than team A does at the same world coordinates.
-    #[test]
-    fn the_map_is_mirror_symmetric() {
-        for x in 0..MAP_SIZE {
-            for y in 0..MAP_SIZE {
-                assert_eq!(
-                    MAP[x][y],
-                    MAP[MAP_SIZE - 1 - x][MAP_SIZE - 1 - y],
-                    "tile ({x}, {y}) has no matching wall at its mirror"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn no_wall_blocks_the_payload() {
-        let corridor = corridor();
-        for x in 0..MAP_SIZE {
-            for y in 0..MAP_SIZE {
-                assert!(
-                    !(corridor[x][y] && MAP[x][y] == MapTile::Wall),
-                    "wall at ({x}, {y}) is within {WALL_PAYLOAD_CLEARANCE} of the payload path"
-                );
-            }
+    /// Deterministic xorshift, so a failure is reproducible.
+    pub(crate) struct Rng(pub(crate) u64);
+    impl Rng {
+        pub(crate) fn next_f32(&mut self) -> f32 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            (self.0 >> 40) as f32 / (1u32 << 24) as f32
         }
     }
 
-    /// A bot's centre can sit in a tile only if that tile and all eight around it are
-    /// clear: its radius is 0.75 and the far corner of a neighbouring tile is 0.707 away,
-    /// so anything narrower than a two-tile gap is not a corridor, it is a wall.
-    fn passable(x: usize, y: usize) -> bool {
-        for dx in -1i32..=1 {
-            for dy in -1i32..=1 {
-                let (nx, ny) = (x as i32 + dx, y as i32 + dy);
-                if nx < 0 || ny < 0 || nx >= MAP_SIZE as i32 || ny >= MAP_SIZE as i32 {
-                    continue; // the map edge is not a wall tile; the boundary handles it
-                }
-                if MAP[nx as usize][ny as usize] == MapTile::Wall {
-                    return false;
-                }
-            }
-        }
-        true
-    }
-
-    fn tile_of(p: Vec2) -> (usize, usize) {
-        (
-            (p.x as usize).min(MAP_SIZE - 1),
-            (p.y as usize).min(MAP_SIZE - 1),
-        )
-    }
-
-    /// No wall may seal off a pocket: both spawns and the whole payload route have to sit
-    /// in one connected region that a bot can actually walk.
-    #[test]
-    fn the_arena_is_connected() {
-        let start = tile_of(PAYLOAD_PATH[0]);
-        assert!(passable(start.0, start.1), "the map centre is not walkable");
-
-        let mut seen = [[false; MAP_SIZE]; MAP_SIZE];
-        let mut stack = vec![start];
-        seen[start.0][start.1] = true;
-        while let Some((x, y)) = stack.pop() {
-            for (dx, dy) in [(1i32, 0i32), (-1, 0), (0, 1), (0, -1)] {
-                let (nx, ny) = (x as i32 + dx, y as i32 + dy);
-                if nx < 0 || ny < 0 || nx >= MAP_SIZE as i32 || ny >= MAP_SIZE as i32 {
-                    continue;
-                }
-                let (nx, ny) = (nx as usize, ny as usize);
-                if seen[nx][ny] || !passable(nx, ny) {
-                    continue;
-                }
-                seen[nx][ny] = true;
-                stack.push((nx, ny));
-            }
-        }
-
-        // both spawns (`action::eval_tick` spawns at `payload_position(-1.0)` and mirrors
-        // it for team B) and every waypoint of the route
-        let mut required: Vec<Vec2> = vec![payload_position(-1.0), payload_position(1.0)];
-        required.extend(PAYLOAD_PATH);
-        for point in required {
-            let (x, y) = tile_of(point);
-            assert!(
-                seen[x][y],
-                "({x}, {y}) -- for {point:?} -- is walled off from the centre of the map"
+    /// Points a bot could actually be standing on.
+    pub(crate) fn sample_free_points(n: usize) -> Vec<Vec2> {
+        let conf = conf();
+        let mut rng = Rng(0x5eed_1234_9abc_def1);
+        let mut out = Vec::with_capacity(n);
+        while out.len() < n {
+            let p = Vec2::new(
+                rng.next_f32() * MAP_SIZE as f32,
+                rng.next_f32() * MAP_SIZE as f32,
             );
+            if point_free(conf, p) {
+                out.push(p);
+            }
         }
-    }
-
-    /// Not an assertion, a picture. `cargo test -- --nocapture render_map`
-    #[test]
-    fn render_map() {
-        let corridor = corridor();
-        println!();
-        for y in (0..MAP_SIZE).rev() {
-            let row: String = (0..MAP_SIZE)
-                .map(|x| match (MAP[x][y], corridor[x][y]) {
-                    (MapTile::Wall, _) => '#',
-                    (_, true) => '+',
-                    _ => '.',
-                })
-                .collect();
-            println!("{y:>2} {row}");
-        }
+        out
     }
 }

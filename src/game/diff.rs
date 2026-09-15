@@ -67,8 +67,8 @@ impl Diff for BotArray {
 #[cfg(test)]
 mod diff_test {
     use super::*;
-    use crate::game::config::{BotConfig, Deposit, GameConfig, MapTile, PayloadConfig, DEPOSITS_MAX, MAP_SIZE, PAYLOAD_PATH};
-    use crate::game::state::{BotClass, GameState, StateOption};
+    use crate::game::config::{BotConfig, DepositConfig, FabricatorConfig, GameConfig, MapTile, PayloadConfig, StatUpgrade, MAP_SIZE, PAYLOAD_PATH, UPGRADE_LEVELS};
+    use crate::game::state::{BotClass, GameState, SpecialState, StateOption};
     use crate::game::util::Vec2;
 
     fn conf() -> GameConfig {
@@ -76,25 +76,35 @@ mod diff_test {
             max_ticks: 100,
             bot: BotConfig {
                 radius: 1.0,
-                base_speed: 1.0,
-                base_health: 10.0,
-                base_turn_speed: 1.0,
-                base_blaster_cooldown: 5,
+                speed: StatUpgrade { value: [1.0 as f32; UPGRADE_LEVELS], cost: 0.0 },
+                health: StatUpgrade { value: [10.0 as f32; UPGRADE_LEVELS], cost: 0.0 },
+                turn_speed: StatUpgrade { value: [1.0 as f32; UPGRADE_LEVELS], cost: 0.0 },
+                blaster_cooldown: StatUpgrade { value: [5 as f32; UPGRADE_LEVELS], cost: 0.0 },
                 base_invulnerability_ticks: 3,
-                base_blaster_range: 10.0,
-                base_blaster_damage: 3.0,
+                blaster_range: StatUpgrade { value: [10.0 as f32; UPGRADE_LEVELS], cost: 0.0 },
+                blaster_damage: StatUpgrade { value: [3.0 as f32; UPGRADE_LEVELS], cost: 0.0 },
                 base_blaster_splash_radius: 0.3,
+                heal_per_tick: StatUpgrade { value: [0.05 as f32; UPGRADE_LEVELS], cost: 0.0 },
+                base_heal_range: 3.0,
+                base_heal_arc_deg: 90.0,
+                heal_stack_cap: (0.15) / (0.05),
+                base_extract_range: 5.0,
+                extract_rate: StatUpgrade { value: [0.1 as f32; UPGRADE_LEVELS], cost: 0.0 },
             },
             payload: PayloadConfig {
                 radius: 1.0,
                 capture_radius: 3.0,
-                speed_per_bot: 0.01,
-                max_speed: 0.04,
-                contest_diff: 1,
+                speed: 0.01,
             },
             payload_path: PAYLOAD_PATH,
-            deposit_count: 0,
-            deposits: [Deposit::default(); DEPOSITS_MAX],
+            deposit: DepositConfig {
+                // Far off the map with no radius: these tests are not about deposits, and
+                // a deposit at the real `DEPOSIT_POS` would be a solid circle in the way.
+                pos: Vec2::new(-100.0, -100.0),
+                radius: 0.0,
+                extractor_cap: 16,
+            },
+            fabricator: FabricatorConfig { interval: 100, rush_cost: 10.0 },
             map: [[MapTile::Empty; MAP_SIZE]; MAP_SIZE],
         }
     }
@@ -102,15 +112,13 @@ mod diff_test {
     fn bot(id: u8) -> BotState {
         BotState {
             id,
-            class: BotClass::Battle,
             health: 10.0,
             pos: Vec2::ZERO,
             vel: Vec2::ZERO,
             angle: 0.0,
             turn_vel: 0.0,
-            next_fire_tick: 0,
             invulnerable_until_tick: 0,
-            shot: StateOption::None,
+            special: SpecialState::new(BotClass::Battle),
         }
     }
 

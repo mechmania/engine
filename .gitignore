@@ -1,3 +1,5 @@
 /target
 langs*
 .direnv*
+*.mmgl
+/log

@@ -21,6 +21,15 @@ use tokio::{
 
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// How long a bot gets to notice `Handoff::Closed` and exit on its own before it is killed.
+///
+/// A bot waiting on the channel is in `await_handoff`'s backoff tail, which rechecks at
+/// most `ipc::MAX_BACKOFF` (~5ms) apart, so this is ~100x the time it takes to see the
+/// flag. The point is that a finished match looks like a clean exit rather than a SIGKILL:
+/// a bot that treats the end of a match as a fatal error exits non-zero and reads as a
+/// crash in the gamelog.
+const SHUTDOWN_GRACE: Duration = Duration::from_millis(500);
+
 struct BotManager {
     channel: EngineChannel,
     name: String,
@@ -85,24 +94,20 @@ impl BotManager {
             .map_or(true, |status| status.is_some())
     }
 
+    /// The handshake never touches `ComputeBudget`: it is bounded by `HANDSHAKE_TIMEOUT`
+    /// wall clock and nothing else, and the bot reports no CPU time for it. Failing it kills
+    /// the bot process outright, which is what actually takes the bot out of the match --
+    /// `tick` sees `exited()` and returns a default action from then on.
     async fn handshake(
         &mut self,
-        team: Team,
-        config: &GameConfig,
+        request: &HandshakeRequest,
         tx: &mpsc::UnboundedSender<Message>,
     ) {
         if !self
             .channel
-            .request::<HandshakeProtocol>(
-                &HandshakeRequest {
-                    team,
-                    config: config.clone(),
-                },
-                HANDSHAKE_TIMEOUT,
-            )
+            .request::<HandshakeProtocol>(request, HANDSHAKE_TIMEOUT)
             .await
             .map_err(|e| {
-                self.budget.forfeit();
                 eprintln!("### FATAL ERROR: bot {} failed handshake: {}", self.name, e);
                 send!(
                     tx,
@@ -114,20 +119,27 @@ impl BotManager {
                 e
             })
             .ok()
-            .map(|(res, _cpu_time)| {
-                let matches = res == HANDSHAKE_MAGIC;
+            .map(|(res, _)| {
+                // Not just "did a bot answer" any more: the answer is a hash of the layout
+                // of everything that crosses the channel, so a bot built against a
+                // different `mm-engine` rev fails here rather than spending the match
+                // reading fields at the wrong offsets.
+                let matches = res == HANDSHAKE_FINGERPRINT;
                 if !matches {
-                    self.budget.forfeit();
                     eprintln!(
-                        "### FATAL ERROR: bot {} failed handshake: expected {}, got {}",
-                        self.name, HANDSHAKE_MAGIC, res
+                        "### FATAL ERROR: bot {} failed handshake: protocol layout mismatch \
+                         (expected {:#x}, got {:#x}) -- the bot was built against a \
+                         different version of the engine",
+                        self.name, HANDSHAKE_FINGERPRINT, res
                     );
                     send!(
                         tx,
                         OutputSource::Gamelog,
-                        "### FATAL ERROR: bot {} failed handshake: expected {}, got {}",
+                        "### FATAL ERROR: bot {} failed handshake: protocol layout mismatch \
+                         (expected {:#x}, got {:#x}) -- the bot was built against a \
+                         different version of the engine",
                         self.name,
-                        HANDSHAKE_MAGIC,
+                        HANDSHAKE_FINGERPRINT,
                         res
                     );
                 }
@@ -167,12 +179,18 @@ impl BotManager {
                     "### [bot {}] error on tick: {e}",
                     self.name
                 );
-                self.budget.forfeit();
+                if e.forfeits_budget() {
+                    self.budget.forfeit();
+                }
                 Default::default()
             }
         };
         res
     }
+}
+
+fn handshake_request(team: Team, config: &GameConfig) -> HandshakeRequest {
+    HandshakeRequest { team, config: config.clone() }
 }
 
 pub async fn run(args: ArgConfig) -> Result<()> {
@@ -181,28 +199,68 @@ pub async fn run(args: ArgConfig) -> Result<()> {
     let conf = GameConfig {
         max_ticks: 7200,
         bot: BotConfig {
-            radius: 0.45,
-            base_speed: 0.1,
-            base_health: 10.0,
-            base_turn_speed: 10.0,
-            base_blaster_cooldown: 60,
+            radius: BOT_RADIUS,
+            speed: StatUpgrade {
+                value: [0.050, 0.056, 0.062, 0.068, 0.075],
+                cost: 25.0,
+            },
+            health: StatUpgrade {
+                value: [10.0, 12.0, 14.0, 16.0, 20.0],
+                cost: 25.0,
+            },
+            turn_speed: StatUpgrade {
+                value: [3.0, 3.5, 4.0, 4.5, 5.0],
+                cost: 15.0,
+            },
+            blaster_cooldown: StatUpgrade {
+                value: [60.0, 52.0, 45.0, 39.0, 33.0],
+                cost: 30.0,
+            },
+            blaster_range: StatUpgrade {
+                value: [10.0, 11.0, 12.0, 13.0, 15.0],
+                cost: 15.0,
+            },
+            blaster_damage: StatUpgrade {
+                value: [3.0, 3.5, 4.0, 4.5, 5.0],
+                cost: 30.0,
+            },
+            // At level 0 one healer exactly cancels one battle bot's sustained damage
+            // (blaster_damage / blaster_cooldown = 3.0 / 60 = 0.05).
+            heal_per_tick: StatUpgrade {
+                value: [0.050, 0.060, 0.070, 0.085, 0.100],
+                cost: 20.0,
+            },
+            extract_rate: StatUpgrade {
+                value: [0.100, 0.125, 0.150, 0.175, 0.200],
+                cost: 20.0,
+            },
             base_invulnerability_ticks: 15,
-            base_blaster_range: 10.0,
-            base_blaster_damage: 3.0,
             base_blaster_splash_radius: 0.3,
+            base_heal_range: 3.0,
+            base_heal_arc_deg: 90.0,
+            // Three healers stack on one target; a fourth is wasted, at every level.
+            heal_stack_cap: 3.0,
+            base_extract_range: 5.0,
         },
         payload: PayloadConfig {
-            radius: 1.5,
-            capture_radius: 3.0,
-            speed_per_bot: 0.01,
-            max_speed: 0.04,
-            contest_diff: 1,
+            radius: 0.75,
+            capture_radius: 2.5,
+            speed: 0.02,
         },
         payload_path: PAYLOAD_PATH,
-        // TODO: deposit layout. Place them in mirror-symmetric pairs so that `mirror_pos`
-        // maps the set onto itself and `GameConfig` needs no `Mirror` impl.
-        deposit_count: 0,
-        deposits: [Deposit::default(); DEPOSITS_MAX],
+        deposit: DepositConfig {
+            pos: DEPOSIT_POS,
+            radius: 0.5,
+            // One level-0 extractor is worth 0.1 tokens/tick, so a saturated deposit pays 1.6.
+            extractor_cap: 16,
+        },
+        fabricator: FabricatorConfig {
+            interval: 100,
+            // Around 500 extractor-ticks: a fleet mining with four extractors buys a rush
+            // roughly every 125 ticks, so paying for bodies beats waiting but does not
+            // trivially outrun the free cadence.
+            rush_cost: 50.0,
+        },
         map: MAP,
     };
 
@@ -219,9 +277,13 @@ pub async fn run(args: ArgConfig) -> Result<()> {
     );
 
     let start = Instant::now();
+    let (request_a, request_b) = (
+        handshake_request(Team::A, &conf),
+        handshake_request(Team::B, &conf),
+    );
     join!(
-        bot_a.handshake(Team::A, &conf, &tx),
-        bot_b.handshake(Team::B, &conf, &tx)
+        bot_a.handshake(&request_a, &tx),
+        bot_b.handshake(&request_b, &tx)
     );
     let mut engine_clock = EngineTickClock::new();
 
@@ -286,10 +348,22 @@ pub async fn run(args: ArgConfig) -> Result<()> {
         start.elapsed()
     );
 
+    // Tell both bots the match is over, then give them a window to exit on their own.
+    // `EngineChannel::drop` also closes, but that happens after everything else is torn
+    // down -- far too late for a bot to act on.
+    bot_a.channel.close();
+    bot_b.channel.close();
+    let _ = tokio::time::timeout(
+        SHUTDOWN_GRACE,
+        async { join!(bot_a.process.wait(), bot_b.process.wait()) },
+    ).await;
+
+    // Anything still alive ignored the close; it gets the old treatment.
+    let _ = join!(bot_a.process.kill(), bot_b.process.kill());
+
+    // After the grace window, not before it: a bot's parting stdout is still worth logging.
     bot_a.io_task.abort();
     bot_b.io_task.abort();
-
-    let _ = join!(bot_a.process.kill(), bot_b.process.kill());
 
     drop(tx);
     drop(bot_a);

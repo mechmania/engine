@@ -78,8 +78,8 @@ pub enum ScanTarget {
     /// A `MapTile::Wall` at tile coordinates `(x, y)`.
     Wall { x: u8, y: u8 },
     Payload,
-    /// An index into `conf.deposits()`.
-    Deposit { index: u8 },
+    /// A deposit, named by the team it belongs to -- see `state::Deposit`.
+    Deposit { team: Team },
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -198,10 +198,10 @@ pub fn scan(
 
     // deposits
     if mask.contains(ScanMask::DEPOSITS) {
-        for (index, deposit) in conf.deposits().iter().enumerate() {
-            if let Some(t) = ray_circle(origin, dir, deposit.pos, deposit.radius) {
-                let what = ScanTarget::Deposit { index: index as u8 };
-                consider(t, what, &mut best_t, &mut target);
+        for team in TEAMS {
+            let deposit = state.deposits()[team];
+            if let Some(t) = ray_circle(origin, dir, deposit.pos, conf.deposit.radius) {
+                consider(t, ScanTarget::Deposit { team }, &mut best_t, &mut target);
             }
         }
     }
@@ -279,7 +279,7 @@ fn ray_walls(conf: &GameConfig, origin: Vec2, dir: Vec2, max_t: f32) -> Option<(
 #[cfg(test)]
 mod geom_test {
     use super::*;
-    use crate::game::state::{Mirror, StateOption};
+    use crate::game::state::{Mirror, SpecialState, StateOption};
     use crate::game::config::MapTile;
 
     const R: f32 = 1.0;
@@ -289,33 +289,35 @@ mod geom_test {
             max_ticks: 100,
             bot: BotConfig {
                 radius: R,
-                base_speed: 1.0,
-                base_health: 10.0,
-                base_turn_speed: 1.0,
-                base_blaster_cooldown: 5,
+                speed: StatUpgrade { value: [1.0 as f32; UPGRADE_LEVELS], cost: 0.0 },
+                health: StatUpgrade { value: [10.0 as f32; UPGRADE_LEVELS], cost: 0.0 },
+                turn_speed: StatUpgrade { value: [1.0 as f32; UPGRADE_LEVELS], cost: 0.0 },
+                blaster_cooldown: StatUpgrade { value: [5 as f32; UPGRADE_LEVELS], cost: 0.0 },
                 base_invulnerability_ticks: 3,
-                base_blaster_range: 10.0,
-                base_blaster_damage: 3.0,
+                blaster_range: StatUpgrade { value: [10.0 as f32; UPGRADE_LEVELS], cost: 0.0 },
+                blaster_damage: StatUpgrade { value: [3.0 as f32; UPGRADE_LEVELS], cost: 0.0 },
                 base_blaster_splash_radius: 0.3,
+                heal_per_tick: StatUpgrade { value: [0.05 as f32; UPGRADE_LEVELS], cost: 0.0 },
+                base_heal_range: 3.0,
+                base_heal_arc_deg: 90.0,
+                heal_stack_cap: (0.15) / (0.05),
+                base_extract_range: 5.0,
+                extract_rate: StatUpgrade { value: [0.1 as f32; UPGRADE_LEVELS], cost: 0.0 },
             },
             payload: PayloadConfig {
                 radius: 2.0,
                 capture_radius: 3.0,
-                speed_per_bot: 0.01,
-                max_speed: 0.04,
-                contest_diff: 1,
+                speed: 0.01,
             },
             payload_path: PAYLOAD_PATH,
-            deposit_count: 1,
-            map: [[MapTile::Empty; MAP_SIZE]; MAP_SIZE],
-            deposits: {
-                let mut d = [Deposit::default(); DEPOSITS_MAX];
-                d[0] = Deposit {
-                    pos: Vec2::new(24.0, 16.0),
-                    radius: 2.0,
-                };
-                d
+            // Team A's deposit; team B's is its mirror image at (8, 16).
+            deposit: DepositConfig {
+                pos: Vec2::new(24.0, 16.0),
+                radius: 2.0,
+                extractor_cap: 16,
             },
+            fabricator: FabricatorConfig { interval: 100, rush_cost: 10.0 },
+            map: [[MapTile::Empty; MAP_SIZE]; MAP_SIZE],
         }
     }
 
@@ -621,8 +623,23 @@ mod geom_test {
             f32::INFINITY,
         )
         .unwrap();
-        assert_eq!(hit.target, ScanTarget::Deposit { index: 0 });
-        approx(hit.dist, 22.0);
+        // Team B's deposit, the mirror image at (8, 16), is the one this ray meets first.
+        assert_eq!(hit.target, ScanTarget::Deposit { team: Team::B });
+        approx(hit.dist, 6.0);
+
+        // ...and team A's at (24, 16) is what the same ray finds coming the other way.
+        let hit = scan(
+            &s,
+            &conf,
+            Vec2::new(32.0, 16.0),
+            Vec2::new(-1.0, 0.0),
+            ScanMask::DEPOSITS,
+            None,
+            f32::INFINITY,
+        )
+        .unwrap();
+        assert_eq!(hit.target, ScanTarget::Deposit { team: Team::A });
+        approx(hit.dist, 6.0);
     }
 
     #[test]
@@ -637,8 +654,10 @@ mod geom_test {
             bot.vel = Vec2::new(0.3, -0.4);
             bot.angle = angle;
             bot.turn_vel = turn_vel;
-            bot.next_fire_tick = 42;
-            bot.shot = StateOption::Some(Vec2::new(11.0, 2.0));
+            bot.special = SpecialState::Battle {
+                next_fire_tick: 42,
+                shot: StateOption::Some(Vec2::new(11.0, 2.0)),
+            };
         }
         let original = s.clone();
 

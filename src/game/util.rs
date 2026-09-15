@@ -3,6 +3,29 @@ use std::ops::{ Add, AddAssign, Sub, SubAssign, Mul, MulAssign, Div, DivAssign, 
 
 pub use std::f32::consts::PI;
 
+/// A type that is valid at an all-zero bit pattern -- `#[repr(C)]` plain data, no
+/// references, no `NonNull`, no enum without a zero discriminant.
+///
+/// # Safety
+///
+/// Implementors must actually satisfy that. The impl is the proof obligation; `boxed_zeroed`
+/// is safe to call once it exists.
+pub unsafe trait Zeroable {}
+
+/// Allocates a zeroed `T` directly on the heap, without a `T` ever existing on a stack.
+///
+/// `Box::new(T { .. })` builds the value in a stack slot and then moves it. An optimized
+/// build usually elides that; a debug build never does. For the one type this exists for --
+/// `MapTopology`, a third of a megabyte -- that difference is a stack overflow.
+pub fn boxed_zeroed<T: Zeroable>() -> Box<T> {
+    let layout = std::alloc::Layout::new::<T>();
+    let ptr = unsafe { std::alloc::alloc_zeroed(layout) } as *mut T;
+    if ptr.is_null() {
+        std::alloc::handle_alloc_error(layout);
+    }
+    unsafe { Box::from_raw(ptr) }
+}
+
 #[inline(always)]
 pub fn normalize_degrees(deg: f32) -> f32 {
     ((deg % 360.0) + 360.0) % 360.0
@@ -19,7 +42,7 @@ pub fn diff_degrees(a: f32, b: f32) -> f32 {
 }
 
 
-#[derive(Serialize, Deserialize, Clone, PartialEq, Copy, Debug)]
+#[derive(Serialize, Deserialize, Clone, PartialEq, Copy, Debug, mm_macros::FfiMirror)]
 #[repr(C)]
 pub struct Vec2 {
     pub x: f32,

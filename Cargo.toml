@@ -6,10 +6,26 @@ name = "mm-engine"
 version = "0.1.0"
 edition = "2021"
 
+[lib]
+crate-type = ["rlib", "cdylib"]
+
+# The match runner is engine-only by construction -- it drives `eval_tick` and names teams
+# absolutely. Saying so here means `--no-default-features --features ffi` skips it instead
+# of failing to build it, so the FFI surface does not need `--lib` on every command.
+[[bin]]
+name = "mm-engine"
+path = "src/main.rs"
+required-features = ["engine"]
+
 [dependencies]
 anyhow = "1.0.98"
 clap = { version = "4.5.40", features = ["derive"] }
 cpu-time = "1.0.0"
+# Compile-time registration of the FFI surface, read back by the Python binding
+# generator. Deliberately not a dependency of `mm-macros` -- that manifest is one
+# hardlinked file shared with both bot crates, so a dep there is compiled by every
+# competitor. The macros emit `::inventory::` by absolute path instead.
+inventory = { version = "0.3", optional = true }
 memmap = "0.7.0"
 mm-macros = { path = "mm-macros" }
 rand = "0.9.1"
@@ -24,3 +40,4 @@ tokio = { version = "1.45.1", features = ["full"] }
 default = ["engine"]
 engine = []
 client = []
+ffi = ["client", "dep:inventory"]

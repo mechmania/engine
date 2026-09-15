@@ -8,7 +8,7 @@ use std::ops::{Index, IndexMut};
 #[cfg_attr(feature = "engine", mm_macros::teams(A, B))]
 #[cfg_attr(feature = "client", mm_macros::teams(Me, Other))]
 mod team_impl {
-    #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
+    #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug, mm_macros::FfiMirror)]
     #[repr(u8)]
     pub enum Team {
         TeamA = 0,
@@ -39,7 +39,7 @@ mod team_impl {
         }
     }
 
-    #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Default)]
+    #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Default, Debug, mm_macros::FfiMirror)]
     #[repr(C)]
     pub struct TeamPair<T> {
         pub team_a: T,
@@ -49,6 +49,13 @@ mod team_impl {
     impl<T> TeamPair<T> {
         pub fn new(team_a: T, team_b: T) -> Self {
             Self { team_a, team_b }
+        }
+
+        /// Exchanges the two halves. The field names are rewritten per build (see
+        /// `mm_macros::teams`), so code outside a `#[teams(..)]` module cannot spell them
+        /// and has to swap through here.
+        pub fn swap(&mut self) {
+            std::mem::swap(&mut self.team_a, &mut self.team_b);
         }
     }
 
@@ -113,7 +120,7 @@ mod team_impl {
         T: Mirror,
     {
         fn mirror(&mut self, conf: &GameConfig) {
-            std::mem::swap(&mut self.team_a, &mut self.team_b);
+            self.swap();
             self.team_a.mirror(conf);
             self.team_b.mirror(conf);
         }
