@@ -21,4 +21,5 @@ pub mod engine;
 pub mod timing;
 #[cfg(feature = "ffi")]
 pub mod ffi;
+// no-op: testing mm-cli self-update
 
