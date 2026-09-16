@@ -217,7 +217,7 @@ pub const MM_PANIC: i32 = 5;
 /// one implementation of the protocol and Python gets the same one a Rust bot does. What
 /// this type adds is the blocking adapter and the lifetimes.
 ///
-/// **Blocking, and who owns the runtime.** `await_handoff` sleeps on tokio, and the C ABI
+/// **Blocking, and who owns the runtime.** `BotChannel`'s primitives are `async`, and the C ABI
 /// is blocking by construction, so the handle owns a `new_current_thread` runtime and
 /// every entry point is a `block_on`. Python never sees a future. The corollary is that
 /// these must not be called from inside another tokio runtime -- irrelevant through
@@ -285,8 +285,8 @@ pub unsafe fn mm_channel_open(path: *const u8, path_len: i32) -> *mut MmChannel 
     let Ok(path) = std::str::from_utf8(bytes) else {
         return std::ptr::null_mut();
     };
-    // `enable_time` and nothing else: the only thing awaited here is `await_handoff`'s
-    // backoff tail, which is a `sleep`. There is no IO driver and no worker pool.
+    // `await_handoff` is a pure spin, so nothing here needs a driver; `enable_time` is kept
+    // only so a future await does not panic. There is no IO driver and no worker pool.
     let Ok(rt) = tokio::runtime::Builder::new_current_thread().enable_time().build() else {
         return std::ptr::null_mut();
     };

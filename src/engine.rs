@@ -23,9 +23,8 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// How long a bot gets to notice `Handoff::Closed` and exit on its own before it is killed.
 ///
-/// A bot waiting on the channel is in `await_handoff`'s backoff tail, which rechecks at
-/// most `ipc::MAX_BACKOFF` (~5ms) apart, so this is ~100x the time it takes to see the
-/// flag. The point is that a finished match looks like a clean exit rather than a SIGKILL:
+/// A bot waiting on the channel is spinning in `await_handoff`, so it sees the flag within
+/// microseconds; this is scheduling slack, not polling latency. The point is that a finished match looks like a clean exit rather than a SIGKILL:
 /// a bot that treats the end of a match as a fatal error exits non-zero and reads as a
 /// crash in the gamelog.
 const SHUTDOWN_GRACE: Duration = Duration::from_millis(500);

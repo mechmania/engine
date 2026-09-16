@@ -15,7 +15,6 @@ use crate::game::{
     topology::init_topology,
 };
 use thiserror::Error;
-use tokio::time;
 
 #[repr(u8)]
 pub enum Handoff {
@@ -62,7 +61,7 @@ pub enum ResponseError {
     #[error("size mismatch (expected {expected}, actual {actual})")]
     SizeMismatch { expected: usize, actual: usize } = 2,
     #[error("response timed out")]
-    Timeout(#[from] time::error::Elapsed) = 3,
+    Timeout = 3,
     /// The bot's response was not a valid value of the type it claimed to be -- an
     /// out-of-range tag, or a `bool` that is neither 0 nor 1. Distinct from `Malformed`
     /// (a wrong handoff byte, a wrong frame tag, a channel closed mid-request) because it
@@ -106,21 +105,6 @@ pub(in super) struct SharedBlock {
     pub frame: Frame,
 }
 
-/// How long to spin before handing the thread back to the timer.
-///
-/// The two sides of a tick are only ~100us apart, but `tokio::time::sleep` cannot resolve
-/// anything below its ~1ms timer granularity -- a `sleep(100us)` really costs ~1.2ms. So the
-/// sleep path is a ~13x cliff, and the spin window has to be wide enough that a normal
-/// handoff never reaches it, or the whole match falls into a 1ms-quantised ping-pong.
-///
-/// A *count* of spins cannot do that job: 1000 `yield_now()`s is ~94us on one machine and
-/// something else entirely on another, so the cliff moves with the hardware and with however
-/// much work the engine happens to do between handoffs.
-const SPIN_WINDOW: Duration = Duration::from_millis(2);
-
-/// Longest backoff once we are off the spin window and into the timer.
-const MAX_BACKOFF: Duration = Duration::from_millis(5);
-
 /// How a wait ended.
 ///
 /// `Closed` is the peer saying the match is over, which is an ordinary event and not a
@@ -130,45 +114,39 @@ const MAX_BACKOFF: Duration = Duration::from_millis(5);
 pub(in super) enum Handed {
     Turn,
     Closed,
+    /// Only reachable with a `timeout`: the peer did not hand back in time.
+    TimedOut,
 }
 
+/// Polls the handoff byte until it reads `until`, the peer closes, or `timeout` passes.
+///
+/// A pure spin, with no yield and no sleep. The obvious alternative, spinning briefly and
+/// then backing off on `tokio::time::sleep`, is quantised to the OS timer: ~1ms on Linux,
+/// but 15.6ms on Windows, whatever the sleep asks for. Once one handoff lands on that
+/// timer, the next peer is asleep when its turn comes, and the match locks into ~60ms a
+/// tick (433s for 7200 ticks, against ~1s here). The cost is a core per waiter for as long
+/// as it waits.
+///
+/// Because the loop never yields, the timeout cannot be a `tokio::time::timeout` around
+/// it -- that future would never be polled again -- so the deadline is checked here, on
+/// every iteration. `None` waits for as long as it takes, which is what a bot wants.
 #[inline(never)]
-pub(in super) async fn await_handoff(handoff: &AtomicU8, until: u8) -> Handed {
-    // One extra compare against a byte the loop has already loaded -- the hot path is
-    // unchanged, and `until` is never `Closed` (nobody waits *for* the end).
-    #[inline(always)]
-    fn settled(handoff: &AtomicU8, until: u8) -> Option<Handed> {
-        match handoff.load(Ordering::Acquire) {
-            got if got == until => Some(Handed::Turn),
-            got if got == Handoff::Closed as u8 => Some(Handed::Closed),
-            _ => None,
-        }
-    }
-
-    let start = Instant::now();
+pub(in super) fn await_handoff(handoff: &AtomicU8, until: u8, timeout: Option<Duration>) -> Handed {
+    // `until` is never `Closed` (nobody waits *for* the end).
+    let deadline = timeout.map(|t| Instant::now() + t);
     loop {
-        // `Instant::now` is not free, so only check the clock once per batch of spins
-        for _ in 0..64 {
-            if let Some(handed) = settled(handoff, until) {
-                return handed;
+        match handoff.load(Ordering::Acquire) {
+            got if got == until => return Handed::Turn,
+            got if got == Handoff::Closed as u8 => return Handed::Closed,
+            _ => {}
+        }
+        if let Some(deadline) = deadline {
+            if Instant::now() >= deadline {
+                return Handed::TimedOut;
             }
-            std::hint::spin_loop();
         }
-        if start.elapsed() >= SPIN_WINDOW {
-            break;
-        }
-        std::thread::yield_now();
+        std::hint::spin_loop();
     }
-
-    // The peer is doing real work (or is gone). Back off on the timer -- every one of these
-    // costs ~1ms whatever we ask for, so ramp rather than hammer.
-    for i in 1u32.. {
-        if let Some(handed) = settled(handoff, until) {
-            return handed;
-        }
-        tokio::time::sleep(MAX_BACKOFF.min(Duration::from_micros(100 * i as u64))).await;
-    }
-    unreachable!("the backoff loop only exits by returning")
 }
 
 // safe because we only grab one byte
@@ -239,19 +217,16 @@ impl EngineChannel {
 
         handoff.store(Handoff::BotTurn as u8, Ordering::Release);
 
-        let handed = time::timeout(timeout, await_handoff(
-            handoff,
-            Handoff::EngineTurn as u8
-        )).await.map_err(|e| {
-            handoff.store(Handoff::EngineTurn as u8, Ordering::Release);
-            e
-        })?;
-
-        // Only the engine writes `Closed`, and only once it is done with this channel, so
-        // seeing it mid-request means someone else is driving the mapping. Reported rather
-        // than silently read as a response.
-        if handed == Handed::Closed {
-            return Err(ResponseError::Malformed);
+        match await_handoff(handoff, Handoff::EngineTurn as u8, Some(timeout)) {
+            Handed::Turn => {}
+            Handed::TimedOut => {
+                handoff.store(Handoff::EngineTurn as u8, Ordering::Release);
+                return Err(ResponseError::Timeout);
+            }
+            // Only the engine writes `Closed`, and only once it is done with this channel, so
+            // seeing it mid-request means someone else is driving the mapping. Reported rather
+            // than silently read as a response.
+            Handed::Closed => return Err(ResponseError::Malformed),
         }
 
         let addr = ptr as usize;
@@ -325,7 +300,7 @@ pub struct BotChannel {
     pub mmap: MmapMut,
     /// Stamped as `await_tick` hands the state over, consumed by `respond`: exactly the
     /// bot's think time, which is what the compute budget is meant to charge for. The
-    /// spin/backoff `await_tick` burns waiting for the engine falls outside it.
+    /// spin `await_tick` burns waiting for the engine falls outside it.
     ///
     /// `Cell` rather than `&mut self` on `respond`, because the real shared state is the
     /// mapping and that is already behind `&self`. A bot is single-threaded.
@@ -363,7 +338,7 @@ impl BotChannel {
     /// `HANDSHAKE_TIMEOUT` wall clock instead of the compute budget.
     pub async fn handshake(&self) -> anyhow::Result<(u8, GameConfig)> {
         let handoff = handoff_byte(&self.mmap);
-        if await_handoff(handoff, Handoff::BotTurn as u8).await == Handed::Closed {
+        if await_handoff(handoff, Handoff::BotTurn as u8, None) == Handed::Closed {
             anyhow::bail!("the engine closed the channel before the handshake");
         }
 
@@ -406,7 +381,7 @@ impl BotChannel {
     /// The returned state borrows the mapping and is valid until the next call.
     pub async fn await_tick(&self) -> Option<&GameState> {
         let handoff = handoff_byte(&self.mmap);
-        if await_handoff(handoff, Handoff::BotTurn as u8).await == Handed::Closed {
+        if await_handoff(handoff, Handoff::BotTurn as u8, None) == Handed::Closed {
             return None;
         }
 
@@ -469,6 +444,25 @@ mod tests {
     use crate::game::config::test_conf;
     use crate::game::state::BotAction;
 
+    /// Runs the bot side of a test on its own thread, against the same backing file.
+    ///
+    /// `await_handoff` never yields, so the two sides cannot share a task the way
+    /// `tokio::join!` would have them: whichever is polled first spins until the other,
+    /// never polled, answers. Two threads is also simply what the real protocol is.
+    fn bot_thread<F>(path: &Path, bot: F) -> std::thread::JoinHandle<()>
+    where
+        F: FnOnce(&BotChannel) + Send + 'static,
+    {
+        let path = path.to_path_buf();
+        std::thread::spawn(move || bot(&BotChannel::from_path(path).unwrap()))
+    }
+
+    /// `BotChannel`'s primitives are `async` for API stability but await nothing, so a
+    /// bare current-thread runtime is enough to drive one to completion off-runtime.
+    fn block_on<F: std::future::Future>(f: F) -> F::Output {
+        tokio::runtime::Builder::new_current_thread().build().unwrap().block_on(f)
+    }
+
     // Exercises the `SharedBlock::cpu_time_nanos` plumbing end-to-end (bot side reports its own
     // CPU time in `BotChannel::handle_request`, engine side reads it back in
     // `EngineChannel::request`) without needing a real separate bot process — a background task
@@ -524,26 +518,21 @@ mod tests {
     #[tokio::test]
     async fn reports_bot_cpu_time() {
         let engine_channel = EngineChannel::new().unwrap();
-        let bot_channel = BotChannel::from_path(engine_channel.backing_file_path()).unwrap();
 
         let conf = test_conf::conf();
         let state = GameState::new(conf);
 
-        let bot = async {
-            let tick = bot_channel.await_tick().await.expect("the channel is open");
+        let bot = bot_thread(engine_channel.backing_file_path(), |bot_channel| {
+            let tick = block_on(bot_channel.await_tick()).expect("the channel is open");
             assert_eq!(tick.tick, 0, "the bot should see the state the engine sent");
             // burn a known amount of CPU so the reported time is unambiguously nonzero
             let start = cpu_time::ProcessTime::now();
             while start.elapsed() < Duration::from_millis(20) {}
             bot_channel.respond(FleetAction::default());
-        };
+        });
 
-        // both sides run on the current task concurrently, mirroring the real protocol's
-        // request/response exchange over the shared `handoff` byte
-        let (_, res) = tokio::join!(
-            bot,
-            engine_channel.request::<TickProtocol>(&state, Duration::from_secs(5)),
-        );
+        let res = engine_channel.request::<TickProtocol>(&state, Duration::from_secs(5)).await;
+        bot.join().unwrap();
         let (action, cpu_time) = res.unwrap();
 
         assert_eq!(action, FleetAction::default());
@@ -566,22 +555,50 @@ mod tests {
         );
     }
 
-    /// The same, but reached from the backoff tail rather than the spin window -- which is
-    /// where a bot actually is when a match ends, since the engine has just spent a tick
-    /// writing the gamelog. The two loops check `Closed` separately, so both are exercised.
-    #[tokio::test]
-    async fn a_channel_closed_during_the_backoff_ends_the_bot_loop() {
+    /// The same, but with the bot already spinning when the close lands -- which is where
+    /// a bot actually is when a match ends.
+    #[test]
+    fn a_channel_closed_while_the_bot_waits_ends_the_bot_loop() {
         let engine_channel = EngineChannel::new().unwrap();
-        let bot_channel = BotChannel::from_path(engine_channel.backing_file_path()).unwrap();
 
-        let closer = async {
-            // long enough to be past SPIN_WINDOW, so the waiter is on the timer
-            tokio::time::sleep(SPIN_WINDOW * 4).await;
-            engine_channel.close();
-        };
+        let bot = bot_thread(engine_channel.backing_file_path(), |bot_channel| {
+            assert!(
+                block_on(bot_channel.await_tick()).is_none(),
+                "a closed channel should end the loop, not deliver a tick",
+            );
+        });
 
-        let (tick, ()) = tokio::join!(bot_channel.await_tick(), closer);
-        assert!(tick.is_none(), "a closed channel should end the loop, not deliver a tick");
+        std::thread::sleep(Duration::from_millis(50));
+        engine_channel.close();
+        bot.join().unwrap();
+    }
+
+    /// The deadline lives inside the spin, not in a `tokio::time::timeout` around it -- a
+    /// future that never yields can never be cancelled from outside. A bot that never
+    /// answers must still come back as `Timeout`, on time, with the turn handed back to the
+    /// engine so the next request is not refused as `Malformed`.
+    #[tokio::test]
+    async fn a_bot_that_never_answers_times_out() {
+        let engine_channel = EngineChannel::new().unwrap();
+        let state = GameState::new(test_conf::conf());
+
+        let timeout = Duration::from_millis(50);
+        let start = Instant::now();
+        let res = engine_channel.request::<TickProtocol>(&state, timeout).await;
+        let waited = start.elapsed();
+
+        assert!(
+            matches!(res, Err(ResponseError::Timeout)),
+            "expected Timeout, got {:?}",
+            res.map(|(action, _)| action),
+        );
+        assert!(waited >= timeout, "returned before the deadline: {waited:?}");
+        assert!(waited < timeout * 10, "overshot the deadline badly: {waited:?}");
+        assert_eq!(
+            handoff_byte(&engine_channel.mmap).load(Ordering::Acquire),
+            Handoff::EngineTurn as u8,
+            "a timed-out request must hand the turn back to the engine",
+        );
     }
 
     /// The engine must refuse an action whose bytes are not a valid value *before* it makes
@@ -591,29 +608,31 @@ mod tests {
     #[tokio::test]
     async fn an_invalid_action_is_refused_before_it_is_read() {
         let engine_channel = EngineChannel::new().unwrap();
-        let bot_channel = BotChannel::from_path(engine_channel.backing_file_path()).unwrap();
 
         let conf = test_conf::conf();
         let state = GameState::new(conf);
 
-        let bot = async {
-            bot_channel.await_tick().await.expect("the channel is open");
-            bot_channel.respond(FleetAction::default());
+        let bot = bot_thread(engine_channel.backing_file_path(), |bot_channel| {
+            block_on(bot_channel.await_tick()).expect("the channel is open");
+            // `respond` flips the handoff byte as its last act, and the engine is spinning
+            // on another thread -- so the bad byte has to land before the flip, not after.
+            // Written by hand, the way an FFI bot fills the mapping.
             // `TurnAction` declares tags 0..=2. Reading this as one is UB the moment the
             // value exists -- which would be in the engine's process, not the bot's.
             unsafe {
                 let frame = bot_channel.at(offset_of!(SharedBlock, frame));
-                let action = frame.add(Frame::PAYLOAD_OFFSET) as *mut u8;
+                let action = frame.add(Frame::PAYLOAD_OFFSET);
+                std::ptr::write(action as *mut FleetAction, FleetAction::default());
                 action
                     .add(offset_of!(FleetAction, bots) + offset_of!(BotAction, turn_action))
                     .write(3);
+                frame.write(TickProtocol::response_tag());
             }
-        };
+            handoff_byte(&bot_channel.mmap).store(Handoff::EngineTurn as u8, Ordering::Release);
+        });
 
-        let (_, res) = tokio::join!(
-            bot,
-            engine_channel.request::<TickProtocol>(&state, Duration::from_secs(5)),
-        );
+        let res = engine_channel.request::<TickProtocol>(&state, Duration::from_secs(5)).await;
+        bot.join().unwrap();
 
         assert!(
             matches!(res, Err(ResponseError::InvalidAction)),
