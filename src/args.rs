@@ -24,8 +24,14 @@ pub struct ArgConfig {
 #[repr(u8)]
 pub enum OutputSource {
     BotA,
+    BotAErr,
     BotB,
+    BotBErr,
     Gamelog,
+}
+
+impl OutputSource {
+    pub const COUNT: usize = 5;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -44,7 +50,9 @@ pub fn parse_cli() -> ArgConfig {
     if let (None, None) = (cli.print.as_ref(), cli.output.as_ref()) {
         cli.print = Some(vec![
             OutputSource::BotA,
+            OutputSource::BotAErr,
             OutputSource::BotB,
+            OutputSource::BotBErr,
             OutputSource::Gamelog,
         ]);
     }
@@ -70,7 +78,9 @@ fn parse_output_mappings(s: &str) -> Result<OutputMapping, String> {
 fn parse_source(s: &str) -> Result<OutputSource, String> {
      match s {
         "a" | "A" => Ok(OutputSource::BotA),
+        "ae" | "AE" => Ok(OutputSource::BotAErr),
         "b" | "B" => Ok(OutputSource::BotB),
+        "be" | "BE" => Ok(OutputSource::BotBErr),
         "g" | "G" => Ok(OutputSource::Gamelog),
         _ => Err(format!("Invalid source '{}'", s)),
     }
@@ -79,8 +89,8 @@ fn parse_source(s: &str) -> Result<OutputSource, String> {
 struct OutputConfig {
     files: Box<[BufWriter<File>]>,
 
-    print: [bool; 3],
-    output_files: [Box<[u8]>; 3],
+    print: [bool; OutputSource::COUNT],
+    output_files: [Box<[u8]>; OutputSource::COUNT],
 }
 
 impl OutputConfig {
@@ -113,7 +123,7 @@ macro_rules! send {
 pub fn spawn_reciever(cli: &ArgConfig) -> io::Result<(mpsc::UnboundedSender<Message>, tokio::task::JoinHandle<io::Result<()>>)> {
     let (tx, mut rx) = mpsc::unbounded_channel();
 
-    let mut print = [false; 3];
+    let mut print = [false; OutputSource::COUNT];
 
     if let Some(prints) = &cli.print {
         for p in prints {
@@ -122,7 +132,7 @@ pub fn spawn_reciever(cli: &ArgConfig) -> io::Result<(mpsc::UnboundedSender<Mess
     }
 
     let mut files: Vec<BufWriter<File>> = vec![];
-    let mut output_files: [Vec<u8>; 3] = core::array::from_fn(|_| vec![]);
+    let mut output_files: [Vec<u8>; OutputSource::COUNT] = core::array::from_fn(|_| vec![]);
 
     if let Some(output) = &cli.output {
         for (i, o) in output.iter().enumerate() {

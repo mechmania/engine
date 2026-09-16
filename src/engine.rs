@@ -42,6 +42,7 @@ impl BotManager {
         command: &Path,
         name: &str,
         source: OutputSource,
+        err_source: OutputSource,
         tx: mpsc::UnboundedSender<Message>,
     ) -> anyhow::Result<Self> {
         let channel = EngineChannel::new()?;
@@ -59,19 +60,20 @@ impl BotManager {
         let io_task = tokio::spawn(async move {
             let mut stdout_reader = BufReader::new(stdout).lines();
             let mut stderr_reader = BufReader::new(stderr).lines();
+            let (mut stdout_done, mut stderr_done) = (false, false);
 
-            loop {
+            while !stdout_done || !stderr_done {
                 tokio::select! {
-                    line = stdout_reader.next_line() => {
+                    line = stdout_reader.next_line(), if !stdout_done => {
                         match line {
                             Ok(Some(line)) => send!(tx, source, "#[{}]: {}", &name_async, line),
-                            Ok(None) | Err(_) => break,
+                            Ok(None) | Err(_) => stdout_done = true,
                         }
                     }
-                    line = stderr_reader.next_line() => {
+                    line = stderr_reader.next_line(), if !stderr_done => {
                         match line {
-                            Ok(Some(line)) => send!(tx, source, "#[{}] ERR: {}", &name_async, line),
-                            Ok(None) | Err(_) => break,
+                            Ok(Some(line)) => send!(tx, err_source, "#[{}] ERR: {}", &name_async, line),
+                            Ok(None) | Err(_) => stderr_done = true,
                         }
                     }
                 }
@@ -97,24 +99,13 @@ impl BotManager {
     /// wall clock and nothing else, and the bot reports no CPU time for it. Failing it kills
     /// the bot process outright, which is what actually takes the bot out of the match --
     /// `tick` sees `exited()` and returns a default action from then on.
-    async fn handshake(
-        &mut self,
-        request: &HandshakeRequest,
-        tx: &mpsc::UnboundedSender<Message>,
-    ) {
+    async fn handshake(&mut self, request: &HandshakeRequest) {
         if !self
             .channel
             .request::<HandshakeProtocol>(request, HANDSHAKE_TIMEOUT)
             .await
             .map_err(|e| {
                 eprintln!("### FATAL ERROR: bot {} failed handshake: {}", self.name, e);
-                send!(
-                    tx,
-                    OutputSource::Gamelog,
-                    "### FATAL ERROR: bot {} failed handshake: {}",
-                    self.name,
-                    e
-                );
                 e
             })
             .ok()
@@ -131,16 +122,6 @@ impl BotManager {
                          different version of the engine",
                         self.name, HANDSHAKE_FINGERPRINT, res
                     );
-                    send!(
-                        tx,
-                        OutputSource::Gamelog,
-                        "### FATAL ERROR: bot {} failed handshake: protocol layout mismatch \
-                         (expected {:#x}, got {:#x}) -- the bot was built against a \
-                         different version of the engine",
-                        self.name,
-                        HANDSHAKE_FINGERPRINT,
-                        res
-                    );
                 }
                 matches
             })
@@ -150,12 +131,7 @@ impl BotManager {
         }
     }
 
-    async fn tick(
-        &mut self,
-        state: &GameState,
-        engine_time: Duration,
-        tx: &mpsc::UnboundedSender<Message>,
-    ) -> FleetAction {
+    async fn tick(&mut self, state: &GameState, engine_time: Duration) -> FleetAction {
         if self.exited() {
             return Default::default();
         }
@@ -172,12 +148,6 @@ impl BotManager {
             }
             Err(e) => {
                 eprintln!("### [bot {}] error on tick: {e}", self.name);
-                send!(
-                    tx,
-                    OutputSource::Gamelog,
-                    "### [bot {}] error on tick: {e}",
-                    self.name
-                );
                 if e.forfeits_budget() {
                     self.budget.forfeit();
                 }
@@ -271,8 +241,8 @@ pub async fn run(args: ArgConfig) -> Result<()> {
     );
 
     let (mut bot_a, mut bot_b) = (
-        BotManager::spawn(&args.bot_a, "A", OutputSource::BotA, tx.clone())?,
-        BotManager::spawn(&args.bot_b, "B", OutputSource::BotB, tx.clone())?,
+        BotManager::spawn(&args.bot_a, "A", OutputSource::BotA, OutputSource::BotAErr, tx.clone())?,
+        BotManager::spawn(&args.bot_b, "B", OutputSource::BotB, OutputSource::BotBErr, tx.clone())?,
     );
 
     let start = Instant::now();
@@ -280,10 +250,7 @@ pub async fn run(args: ArgConfig) -> Result<()> {
         handshake_request(Team::A, &conf),
         handshake_request(Team::B, &conf),
     );
-    join!(
-        bot_a.handshake(&request_a, &tx),
-        bot_b.handshake(&request_b, &tx)
-    );
+    join!(bot_a.handshake(&request_a), bot_b.handshake(&request_b));
     let mut engine_clock = EngineTickClock::new();
 
     let mut last_state: Option<GameState> = None;
@@ -298,8 +265,8 @@ pub async fn run(args: ArgConfig) -> Result<()> {
         let mut mirrored_state = state.clone();
         mirrored_state.mirror(&conf);
 
-        let mut action_a = bot_a.tick(&state, last_tick_time, &tx).await;
-        let mut action_b = bot_b.tick(&mirrored_state, last_tick_time, &tx).await;
+        let mut action_a = bot_a.tick(&state, last_tick_time).await;
+        let mut action_b = bot_b.tick(&mirrored_state, last_tick_time).await;
 
         action_a.sanitize();
         action_b.sanitize();
@@ -339,6 +306,8 @@ pub async fn run(args: ArgConfig) -> Result<()> {
     // };
 
     let winner: Option<&str> = None;
+
+    println!("{}", serde_json::json!({"winner": winner}));
 
     send!(
         tx,
