@@ -264,7 +264,9 @@ impl Default for MoveAction {
 
 impl Action for MoveAction {
     fn sanitize(&mut self) {
-        self.direction = self.direction.normalize_or_zero();
+        if self.direction.norm_sq() > 1.0 {
+            self.direction = self.direction.normalize_or_zero();
+        }
     }
 }
 
