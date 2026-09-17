@@ -13,11 +13,6 @@ pub const BOT_RADIUS: f32 = 0.25;
 
 pub const PAYLOAD_PATH_LEN: usize = 7;
 
-/// How many levels an upgradeable stat has, level 0 -- the base value -- included. A stat
-/// therefore tops out at `UPGRADE_LEVELS - 1`, and a fleet can buy `UPGRADE_LEVELS - 1`
-/// levels of it.
-pub const UPGRADE_LEVELS: usize = 5;
-
 /// Team A's deposit. Team B's is this point's `mirror_pos` image, `(9.0, 2.0)` -- only
 /// half the layout is written for the same reason only half of `MAP_ART` is.
 ///
@@ -159,41 +154,7 @@ pub const MAP: Map = build_map();
 //     pub possession_slowdown: f32,
 // }
 
-/// One upgradeable stat: every value it can take, and what a level of it costs.
-///
-/// The table *is* the stat -- there is no separate `base_` field. `value[0]` is what the
-/// stat was before anyone spent a token, so a fleet that never upgrades plays exactly as it
-/// did before upgrades existed.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, mm_macros::FfiMirror)]
-#[repr(C)]
-pub struct StatUpgrade {
-    /// `value[n]` is the stat at level `n`. Nothing requires the table to be increasing:
-    /// `blaster_cooldown` counts down, since a shorter cooldown is the better stat.
-    pub value: [f32; UPGRADE_LEVELS],
-    /// Buying level `n` costs `cost * n`, so successive levels of one stat get steadily
-    /// more expensive and maxing it costs `cost * (UPGRADE_LEVELS * (UPGRADE_LEVELS - 1) / 2)`.
-    pub cost: f32,
-}
-
-impl StatUpgrade {
-    /// The stat at `level`, clamped to the table -- a level past the end reads as the max.
-    pub fn at(&self, level: u8) -> f32 {
-        self.value[(level as usize).min(UPGRADE_LEVELS - 1)]
-    }
-
-    /// Price of moving from `level` to `level + 1`, `None` once the stat is maxed.
-    pub fn cost_of(&self, level: u8) -> Option<f32> {
-        let next = level as usize + 1;
-        if next >= UPGRADE_LEVELS {
-            None
-        } else {
-            Some(self.cost * next as f32)
-        }
-    }
-}
-
-/// The fabricator's own knobs. The stats it sells live on `BotConfig` as `StatUpgrade`s;
-/// this is what it costs to run the thing.
+/// The fabricator's own knobs. Tokens buy bots and nothing else.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, mm_macros::FfiMirror)]
 #[repr(C)]
 pub struct FabricatorConfig {
@@ -204,28 +165,31 @@ pub struct FabricatorConfig {
     /// timer. Flat rather than scaling: the timer already bounds how fast bodies arrive,
     /// since at most one bot per fleet enters per tick.
     pub rush_cost: f32,
+    /// Tokens each fleet holds on tick 0.
+    pub starting_tokens: f32,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, mm_macros::FfiMirror)]
 #[repr(C)]
 pub struct BotConfig {
     pub radius: f32,
-    pub speed: StatUpgrade,
-    pub health: StatUpgrade,
-    pub turn_speed: StatUpgrade,
-    /// Ticks between shots. Read as `.at(level) as u32` -- one float table type beats a
-    /// second integer flavour of `StatUpgrade` for the sake of one stat.
-    pub blaster_cooldown: StatUpgrade,
-    pub blaster_range: StatUpgrade,
-    pub blaster_damage: StatUpgrade,
+    /// World units per tick.
+    pub speed: f32,
+    pub health: f32,
+    /// Degrees per tick.
+    pub turn_speed: f32,
+    /// Ticks between shots.
+    pub blaster_cooldown: u32,
+    pub blaster_range: f32,
+    pub blaster_damage: f32,
     /// Health per tick one healer restores to its target. Continuous while the healer
     /// channels -- there is no heal cooldown, so `next_fire_tick` stays blaster-only.
-    pub heal_per_tick: StatUpgrade,
+    pub heal_per_tick: f32,
     /// Tokens one extractor adds to its fleet each tick it holds an extraction slot.
-    pub extract_rate: StatUpgrade,
+    pub extract_rate: f32,
 
-    // Everything below is fixed. `base_` marks a per-bot stat that simply has no upgrade;
-    // a name without it is a rule of the game rather than a stat at all.
+    // Everything below is fixed. `base_` marks a per-bot stat; a name without it is a rule
+    // of the game rather than a stat at all.
     /// Ticks of invulnerability granted by taking a blast, counted from the tick of the
     /// hit. Also what makes a bot take at most one blast per tick.
     pub base_invulnerability_ticks: u32,
@@ -237,11 +201,8 @@ pub struct BotConfig {
     /// Full arc width in degrees. The target must lie within half of this of the healer's
     /// facing, which is what gives `angle` a job on a class that names its target by id.
     pub base_heal_arc_deg: f32,
-    /// How many healers' worth of healing one bot can receive per tick, in total. A
-    /// *multiple* of the fleet's current `heal_per_tick` rather than a flat ceiling, so
-    /// "three healers stack, a fourth is wasted" stays true at every upgrade level instead
-    /// of a heal-rate upgrade quietly eating itself against a fixed cap. Not `base_` --
-    /// this is a rule, not an upgradeable stat.
+    /// How many healers' worth of healing one bot can receive per tick, in total, as a
+    /// multiple of `heal_per_tick`: "three healers stack, a fourth is wasted".
     pub heal_stack_cap: f32,
     /// How far an extractor's ray reaches. Only walls and the map boundary block it --
     /// neither bots nor the payload do, so an extractor can mine through a crowd.
@@ -279,7 +240,11 @@ pub struct DepositConfig {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, mm_macros::FfiMirror)]
 #[repr(C)]
 pub struct GameConfig {
+    /// Total match length, endgame included.
     pub max_ticks: u32,
+    /// Length of the endgame, the last phase of the match: it starts at
+    /// `max_ticks - endgame_ticks`, and no bot is built from then on.
+    pub endgame_ticks: u32,
     pub bot: BotConfig,
     pub payload: PayloadConfig,
     /// The payload's route, center -> team B's goal -- normally `PAYLOAD_PATH`. Team A's
@@ -332,22 +297,23 @@ pub(crate) mod test_conf {
         init_topology(&MAP, BOT_RADIUS);
         CONF.get_or_init(|| GameConfig {
             max_ticks: 7200,
+            endgame_ticks: 0,
             bot: BotConfig {
                 radius: BOT_RADIUS,
-                speed: StatUpgrade { value: [0.05 as f32; UPGRADE_LEVELS], cost: 0.0 },
-                health: StatUpgrade { value: [10.0 as f32; UPGRADE_LEVELS], cost: 0.0 },
-                turn_speed: StatUpgrade { value: [3.0 as f32; UPGRADE_LEVELS], cost: 0.0 },
-                blaster_cooldown: StatUpgrade { value: [60 as f32; UPGRADE_LEVELS], cost: 0.0 },
+                speed: 0.05,
+                health: 10.0,
+                turn_speed: 3.0,
+                blaster_cooldown: 60,
                 base_invulnerability_ticks: 15,
-                blaster_range: StatUpgrade { value: [10.0 as f32; UPGRADE_LEVELS], cost: 0.0 },
-                blaster_damage: StatUpgrade { value: [3.0 as f32; UPGRADE_LEVELS], cost: 0.0 },
+                blaster_range: 10.0,
+                blaster_damage: 3.0,
                 base_blaster_splash_radius: 0.3,
-                heal_per_tick: StatUpgrade { value: [0.05 as f32; UPGRADE_LEVELS], cost: 0.0 },
+                heal_per_tick: 0.05,
                 base_heal_range: 3.0,
                 base_heal_arc_deg: 90.0,
                 heal_stack_cap: (0.15) / (0.05),
                 base_extract_range: 5.0,
-                extract_rate: StatUpgrade { value: [0.1 as f32; UPGRADE_LEVELS], cost: 0.0 },
+                extract_rate: 0.1,
             },
             payload: PayloadConfig {
                 radius: 0.75,
@@ -362,7 +328,7 @@ pub(crate) mod test_conf {
                 radius: 0.0,
                 extractor_cap: 16,
             },
-            fabricator: FabricatorConfig { interval: 100, rush_cost: 10.0 },
+            fabricator: FabricatorConfig { interval: 100, rush_cost: 10.0, starting_tokens: 0.0 },
             map: MAP,
         })
     }

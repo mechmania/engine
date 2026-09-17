@@ -1,7 +1,7 @@
 use crate::{
     args::*,
     game::{
-        action::eval_tick, config::*, diff::Diff, state::{Action, FleetAction, GameState, Mirror}, team::Team
+        action::{eval_tick, match_result}, config::*, diff::Diff, state::{Action, FleetAction, GameState, Mirror}, team::Team
     },
     ipc::*,
     timing::{ComputeBudget, EngineTickClock, TICK_HANG_TIMEOUT},
@@ -166,48 +166,25 @@ pub async fn run(args: ArgConfig) -> Result<()> {
     let (tx, recv_task) = spawn_reciever(&args)?;
 
     let conf = GameConfig {
-        max_ticks: 7200,
+        max_ticks: 9000,
+        endgame_ticks: 3000,
         bot: BotConfig {
             radius: BOT_RADIUS,
-            speed: StatUpgrade {
-                value: [0.050, 0.056, 0.062, 0.068, 0.075],
-                cost: 25.0,
-            },
-            health: StatUpgrade {
-                value: [10.0, 12.0, 14.0, 16.0, 20.0],
-                cost: 25.0,
-            },
-            turn_speed: StatUpgrade {
-                value: [3.0, 3.5, 4.0, 4.5, 5.0],
-                cost: 15.0,
-            },
-            blaster_cooldown: StatUpgrade {
-                value: [60.0, 52.0, 45.0, 39.0, 33.0],
-                cost: 30.0,
-            },
-            blaster_range: StatUpgrade {
-                value: [10.0, 11.0, 12.0, 13.0, 15.0],
-                cost: 15.0,
-            },
-            blaster_damage: StatUpgrade {
-                value: [3.0, 3.5, 4.0, 4.5, 5.0],
-                cost: 30.0,
-            },
-            // At level 0 one healer exactly cancels one battle bot's sustained damage
+            speed: 0.05,
+            health: 10.0,
+            turn_speed: 3.0,
+            blaster_cooldown: 60,
+            blaster_range: 10.0,
+            blaster_damage: 3.0,
+            // One healer exactly cancels one battle bot's sustained damage
             // (blaster_damage / blaster_cooldown = 3.0 / 60 = 0.05).
-            heal_per_tick: StatUpgrade {
-                value: [0.050, 0.060, 0.070, 0.085, 0.100],
-                cost: 20.0,
-            },
-            extract_rate: StatUpgrade {
-                value: [0.100, 0.125, 0.150, 0.175, 0.200],
-                cost: 20.0,
-            },
+            heal_per_tick: 0.05,
+            extract_rate: 0.1,
             base_invulnerability_ticks: 15,
             base_blaster_splash_radius: 0.3,
             base_heal_range: 3.0,
             base_heal_arc_deg: 90.0,
-            // Three healers stack on one target; a fourth is wasted, at every level.
+            // Three healers stack on one target; a fourth is wasted.
             heal_stack_cap: 3.0,
             base_extract_range: 5.0,
         },
@@ -220,15 +197,17 @@ pub async fn run(args: ArgConfig) -> Result<()> {
         deposit: DepositConfig {
             pos: DEPOSIT_POS,
             radius: 0.5,
-            // One level-0 extractor is worth 0.1 tokens/tick, so a saturated deposit pays 1.6.
+            // One extractor is worth 0.1 tokens/tick, so a saturated deposit pays 1.6.
             extractor_cap: 16,
         },
         fabricator: FabricatorConfig {
-            interval: 100,
+            interval: 200,
             // Around 500 extractor-ticks: a fleet mining with four extractors buys a rush
             // roughly every 125 ticks, so paying for bodies beats waiting but does not
             // trivially outrun the free cadence.
             rush_cost: 50.0,
+            // Sixteen rush orders' worth.
+            starting_tokens: 800.0,
         },
         map: MAP,
     };
@@ -255,10 +234,8 @@ pub async fn run(args: ArgConfig) -> Result<()> {
 
     let mut last_state: Option<GameState> = None;
     let mut state = GameState::new(&conf);
-    let mut _needs_reset = true;
-    let mut _endgame_reset = false;
 
-    while state.tick < conf.max_ticks {
+    let result = loop {
         let last_tick_time = engine_clock.average();
         // println!("engine tick time: {:?}", last_tick_time);
 
@@ -295,19 +272,23 @@ pub async fn run(args: ArgConfig) -> Result<()> {
         }
 
         last_state = Some(state.clone());
-    }
 
-    // let winner = if state.score.a > state.score.b {
-    //     Some("Bot A")
-    // } else if state.score.a < state.score.b {
-    //     Some("Bot B")
-    // } else {
-    //     None
-    // };
+        if let Some(result) = match_result(&state, &conf) {
+            break result;
+        }
+    };
 
-    let winner: Option<&str> = None;
-
+    let winner = result.winner.map(|team| match team {
+        Team::A => "A",
+        Team::B => "B",
+    });
     println!("{}", serde_json::json!({"winner": winner}));
+    send!(
+        tx,
+        OutputSource::Gamelog,
+        "# result: {}",
+        serde_json::json!({"winner": winner, "reason": result.reason, "tick": state.tick})
+    );
 
     send!(
         tx,

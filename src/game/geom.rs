@@ -287,22 +287,23 @@ mod geom_test {
     fn conf() -> GameConfig {
         GameConfig {
             max_ticks: 100,
+            endgame_ticks: 0,
             bot: BotConfig {
                 radius: R,
-                speed: StatUpgrade { value: [1.0 as f32; UPGRADE_LEVELS], cost: 0.0 },
-                health: StatUpgrade { value: [10.0 as f32; UPGRADE_LEVELS], cost: 0.0 },
-                turn_speed: StatUpgrade { value: [1.0 as f32; UPGRADE_LEVELS], cost: 0.0 },
-                blaster_cooldown: StatUpgrade { value: [5 as f32; UPGRADE_LEVELS], cost: 0.0 },
+                speed: 1.0,
+                health: 10.0,
+                turn_speed: 1.0,
+                blaster_cooldown: 5,
                 base_invulnerability_ticks: 3,
-                blaster_range: StatUpgrade { value: [10.0 as f32; UPGRADE_LEVELS], cost: 0.0 },
-                blaster_damage: StatUpgrade { value: [3.0 as f32; UPGRADE_LEVELS], cost: 0.0 },
+                blaster_range: 10.0,
+                blaster_damage: 3.0,
                 base_blaster_splash_radius: 0.3,
-                heal_per_tick: StatUpgrade { value: [0.05 as f32; UPGRADE_LEVELS], cost: 0.0 },
+                heal_per_tick: 0.05,
                 base_heal_range: 3.0,
                 base_heal_arc_deg: 90.0,
                 heal_stack_cap: (0.15) / (0.05),
                 base_extract_range: 5.0,
-                extract_rate: StatUpgrade { value: [0.1 as f32; UPGRADE_LEVELS], cost: 0.0 },
+                extract_rate: 0.1,
             },
             payload: PayloadConfig {
                 radius: 2.0,
@@ -316,7 +317,7 @@ mod geom_test {
                 radius: 2.0,
                 extractor_cap: 16,
             },
-            fabricator: FabricatorConfig { interval: 100, rush_cost: 10.0 },
+            fabricator: FabricatorConfig { interval: 100, rush_cost: 10.0, starting_tokens: 0.0 },
             map: [[MapTile::Empty; MAP_SIZE]; MAP_SIZE],
         }
     }

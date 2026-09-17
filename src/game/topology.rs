@@ -869,7 +869,7 @@ mod topology_test {
     #[test]
     fn navigate_to_arrives_without_clipping_a_wall() {
         let conf = conf();
-        let speed = conf.bot.speed.value[0];
+        let speed = conf.bot.speed;
         let points = sample_free_points(24);
 
         for pair in points.chunks(2).filter(|c| c.len() == 2) {

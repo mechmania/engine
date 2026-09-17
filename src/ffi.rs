@@ -24,9 +24,9 @@
 
 use mm_macros::{mm_ffi_fn, mm_ffi_handle};
 
-use crate::game::config::{GameConfig, Map, BOTS_MAX, MAP_SIZE, PAYLOAD_PATH_LEN, UPGRADE_LEVELS};
+use crate::game::config::{GameConfig, Map, BOTS_MAX, MAP_SIZE, PAYLOAD_PATH_LEN};
 use crate::game::mirror::{FfiAliasDesc, FfiConstDesc, FfiMirrorDesc, FfiMirrorType};
-use crate::game::state::{BotId, FleetAction, GameState, StateOption, Upgrade, UPGRADE_COUNT};
+use crate::game::state::{BotId, FleetAction, GameState, StateOption};
 use crate::game::team::{Team, TeamPair};
 use crate::game::topology;
 use crate::game::util::Vec2;
@@ -135,7 +135,7 @@ macro_rules! mm_ffi_alias {
 /// (`every_array_length_resolves_and_agrees_with_the_measured_size`).
 ///
 /// The values are also emitted to Python as plain constants, which is where bot code gets
-/// `BOTS_MAX` and `UPGRADE_COUNT`.
+/// `BOTS_MAX`.
 macro_rules! mm_ffi_const {
     ($($name:literal: $value:expr),* $(,)?) => {
         $(
@@ -147,13 +147,11 @@ macro_rules! mm_ffi_const {
 }
 
 // Every length spelled in the closure today: `[BotAction; BOTS_MAX]`,
-// `[BotState; BOTS_MAX]`, `[bool; BOTS_MAX]`, `[f32; UPGRADE_LEVELS]`,
-// `[u8; UPGRADE_COUNT]`, `[Vec2; PAYLOAD_PATH_LEN]`, `[[MapTile; MAP_SIZE]; MAP_SIZE]`.
+// `[BotState; BOTS_MAX]`, `[bool; BOTS_MAX]`, `[Vec2; PAYLOAD_PATH_LEN]`,
+// `[[MapTile; MAP_SIZE]; MAP_SIZE]`.
 mm_ffi_const! {
     "BOTS_MAX": BOTS_MAX,
     "MAP_SIZE": MAP_SIZE,
-    "UPGRADE_COUNT": UPGRADE_COUNT,
-    "UPGRADE_LEVELS": UPGRADE_LEVELS,
     "PAYLOAD_PATH_LEN": PAYLOAD_PATH_LEN,
     "MM_OK": MM_OK as usize,
     "MM_CLOSED": MM_CLOSED as usize,
@@ -171,7 +169,6 @@ mm_ffi_instantiate! {
     "StateOption<Vec2>": StateOption<Vec2> => ["Vec2"],
     "StateOption<BotId>": StateOption<BotId> => ["BotId"],
     "StateOption<Team>": StateOption<Team> => ["Team"],
-    "StateOption<Upgrade>": StateOption<Upgrade> => ["Upgrade"],
     "TeamPair<u32>": TeamPair<u32> => ["u32"],
 }
 
@@ -515,10 +512,10 @@ pub unsafe fn mm_route_waypoints(
 // -----------------------------------------------------------------------------------
 //
 // Everything below is something a Rust bot gets from the shared source for free and a
-// Python bot has no route to: a rule (`payload_position`'s arc-length walk, the
-// `Upgrade` -> `StatUpgrade` table, `point_free`'s "at the bot's radius") or a piece of
-// geometry. Crossing the ABI rather than re-deriving it in Python is the same bargain the
-// navigation calls make -- one implementation, and no eighth-upgrade drift.
+// Python bot has no route to: a rule (`payload_position`'s arc-length walk,
+// `point_free`'s "at the bot's radius") or a piece of geometry. Crossing the ABI rather than
+// re-deriving it in Python is the same bargain the navigation calls make -- one
+// implementation, and no drift.
 
 /// Center of the payload circle at capture progress `capture`, written to `out` as two
 /// floats. `GameState::payload_pos()` is this called with `state.capture`.
@@ -547,48 +544,6 @@ pub unsafe fn mm_payload_pos(capture: f32, out: *mut f32) {
         out.write(p.x);
         out.add(1).write(p.y);
     }
-}
-
-/// The effective value of upgrade `upgrade` at fleet level `level`.
-///
-/// This is `GameState::stat` minus the state: the level is what a bot reads out of its own
-/// `FabricatorState::upgrades`, so only the `Upgrade` -> `StatUpgrade` table has to cross.
-/// That table is the part that cannot be hand-ported safely -- a ninth upgrade added
-/// engine-side would leave a Python copy quietly answering with the wrong row.
-///
-/// `NaN` on an `upgrade` byte that names no variant, and on a handle that cannot serve the
-/// query. `level` needs no validation: `StatUpgrade::at` clamps it.
-#[mm_ffi_fn]
-pub fn mm_stat(ch: *const MmChannel, upgrade: u8, level: u8) -> f32 {
-    let conf = config!(ch, f32::NAN);
-    // Matched, not transmuted: `upgrade` is a byte Python wrote and an undeclared
-    // discriminant is invalid the instant it becomes an `Upgrade`.
-    let Some(up) = upgrade_from_u8(upgrade) else {
-        return f32::NAN;
-    };
-    up.stat(conf).at(level)
-}
-
-/// What moving `upgrade` from `level` to `level + 1` costs.
-///
-/// `-1.0` once the stat is maxed (`StatUpgrade::cost_of`'s `None`), `NaN` on an unknown
-/// `upgrade` or an unusable handle. A real price is never negative, so the two stay
-/// distinguishable -- the same split `mm_path_length` uses.
-#[mm_ffi_fn]
-pub fn mm_upgrade_cost(ch: *const MmChannel, upgrade: u8, level: u8) -> f32 {
-    let conf = config!(ch, f32::NAN);
-    let Some(up) = upgrade_from_u8(upgrade) else {
-        return f32::NAN;
-    };
-    up.stat(conf).cost_of(level).unwrap_or(-1.0)
-}
-
-/// `Upgrade` from the byte Python sent, or `None` if it names no variant.
-///
-/// Spelled out rather than derived so that adding a variant is a compile error here --
-/// which is the whole reason `mm_stat` exists rather than a Python copy of the table.
-fn upgrade_from_u8(byte: u8) -> Option<Upgrade> {
-    Upgrade::ALL.iter().copied().find(|up| *up as u8 == byte)
 }
 
 /// Whether a bot can stand centred at `(x, y)` -- `mm_disc_free` at the bot's own radius.
@@ -683,8 +638,6 @@ mod ffi_test {
             cap: i32,
         ) -> i32;
         fn mm_payload_pos(capture: f32, out: *mut f32);
-        fn mm_stat(ch: *const MmChannel, upgrade: u8, level: u8) -> f32;
-        fn mm_upgrade_cost(ch: *const MmChannel, upgrade: u8, level: u8) -> f32;
         fn mm_point_free(ch: *const MmChannel, x: f32, y: f32) -> bool;
         fn mm_point_seg_dist(px: f32, py: f32, ax: f32, ay: f32, bx: f32, by: f32) -> f32;
         fn mm_normalize_degrees(deg: f32) -> f32;
@@ -793,8 +746,8 @@ mod ffi_test {
         }
     }
 
-    /// The rules that are not navigation: the payload's arc-length walk, the upgrade
-    /// tables, and the two angle helpers.
+    /// The rules that are not navigation: the payload's arc-length walk and the two
+    /// angle helpers.
     ///
     /// Same shape as the conformance test above -- asserted against the safe function each
     /// one wraps, never against a recorded number, because every one of these reads config
@@ -813,29 +766,6 @@ mod ffi_test {
             let want = crate::game::config::payload_position(t);
             assert_eq!((out[0], out[1]), (want.x, want.y), "payload_pos disagrees at {t}");
         }
-
-        for up in Upgrade::ALL {
-            let table = up.stat(conf);
-            // Past `UPGRADE_LEVELS` on purpose: `StatUpgrade::at` clamps, and the wrapper
-            // must not add a check of its own that turns a clamp into a `NaN`.
-            for level in 0..(UPGRADE_LEVELS as u8 + 2) {
-                assert_eq!(
-                    unsafe { mm_stat(ch, up as u8, level) },
-                    table.at(level),
-                    "stat disagrees for {up:?} at level {level}"
-                );
-                assert_eq!(
-                    unsafe { mm_upgrade_cost(ch, up as u8, level) },
-                    table.cost_of(level).unwrap_or(-1.0),
-                    "upgrade_cost disagrees for {up:?} at level {level}"
-                );
-            }
-        }
-
-        // A byte that names no variant is refused rather than transmuted into one.
-        let bogus = Upgrade::ALL.len() as u8;
-        assert!(unsafe { mm_stat(ch, bogus, 0) }.is_nan(), "an unknown upgrade must be NaN");
-        assert!(unsafe { mm_upgrade_cost(ch, bogus, 0) }.is_nan());
 
         for step in -40i32..=40 {
             let deg = step as f32 * 17.5;
@@ -943,8 +873,6 @@ mod ffi_test {
             assert!(!mm_line_of_sight(null, 1.0, 1.0, 2.0, 2.0));
             assert!(!mm_disc_free(null, 1.0, 1.0, 0.25));
             assert!(!mm_point_free(null, 1.0, 1.0));
-            assert!(mm_stat(null, 0, 0).is_nan());
-            assert!(mm_upgrade_cost(null, 0, 0).is_nan());
             assert_eq!(mm_route_waypoints(null, 1.0, 1.0, 2.0, 2.0, std::ptr::null_mut(), 0), -2);
 
             // `mm_payload_pos` takes no handle, so its only caller mistake is a null out
@@ -1151,8 +1079,6 @@ mod ffi_test {
             "mm_disc_free",
             "mm_route_waypoints",
             "mm_payload_pos",
-            "mm_stat",
-            "mm_upgrade_cost",
             "mm_point_free",
             "mm_point_seg_dist",
             "mm_normalize_degrees",
@@ -1186,7 +1112,7 @@ mod ffi_test {
         // registry is asserted here where a shortfall is unambiguous.
         //
         // The `mm_test_panics_*` probes below register too, hence the two extra.
-        assert_eq!(fns.len(), 19 + 2, "registered entry points: {fns:?}");
+        assert_eq!(fns.len(), 17 + 2, "registered entry points: {fns:?}");
     }
 }
 
@@ -1249,7 +1175,6 @@ mod mirror_test {
         let expected: BTreeSet<&str> = [
             // state.rs -- note `StateOption` and `TeamPair` themselves are absent: a
             // generic type cannot register, so only its instantiations appear.
-            "Upgrade",
             "BotState",
             "SpecialState",
             "MoveAction",
@@ -1264,7 +1189,6 @@ mod mirror_test {
             "GameState",
             // config.rs
             "MapTile",
-            "StatUpgrade",
             "FabricatorConfig",
             "BotConfig",
             "PayloadConfig",
@@ -1278,7 +1202,6 @@ mod mirror_test {
             "StateOption<Vec2>",
             "StateOption<BotId>",
             "StateOption<Team>",
-            "StateOption<Upgrade>",
             "TeamPair<u32>",
         ]
         .into_iter()
@@ -1353,8 +1276,6 @@ mod mirror_test {
 
         assert_eq!(consts["BOTS_MAX"], 32);
         assert_eq!(consts["MAP_SIZE"], 32);
-        assert_eq!(consts["UPGRADE_COUNT"], 8);
-        assert_eq!(consts["UPGRADE_LEVELS"], 5);
         assert_eq!(consts["PAYLOAD_PATH_LEN"], 7);
 
         // The status codes share the registry, because they share a destination: a
@@ -1366,7 +1287,7 @@ mod mirror_test {
         assert_eq!(consts["MM_MALFORMED"], 3);
         assert_eq!(consts["MM_IO"], 4);
         assert_eq!(consts["MM_PANIC"], 5);
-        assert_eq!(consts.len(), 11);
+        assert_eq!(consts.len(), 9);
     }
 
     /// The cross-check that keeps size division honest. A declared length is only useful if
@@ -1464,7 +1385,7 @@ mod mirror_test {
                 checked += 1;
             }
         }
-        assert!(checked >= 7, "only {checked} array fields found; the walk is not reaching them");
+        assert!(checked >= 5, "only {checked} array fields found; the walk is not reaching them");
     }
 
     /// Both aliases in the closure resolve to something real, and to the right size.
@@ -1504,7 +1425,7 @@ mod mirror_test {
         // ... which moves what follows it in `FleetAction`.
         assert_eq!(
             field("FleetAction", "fabricator_next").offset + 1,
-            field("FleetAction", "upgrade").offset
+            field("FleetAction", "rush_order").offset
         );
     }
 
@@ -1517,9 +1438,6 @@ mod mirror_test {
             .map(|v| (v.name, v.tag))
             .collect();
         assert_eq!(state_option, vec![("None", 0), ("Some", 1)]);
-
-        let upgrades: Vec<u8> = variants("Upgrade").iter().map(|v| v.tag).collect();
-        assert_eq!(upgrades, (0..8).collect::<Vec<u8>>());
 
         let teams: Vec<u8> = variants("Team").iter().map(|v| v.tag).collect();
         assert_eq!(teams, vec![0, 1]);

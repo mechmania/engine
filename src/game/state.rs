@@ -54,61 +54,6 @@ impl<T> StateOption<T> {
     }
 }
 
-/// The stats a fabricator sells. One purchase of one of these per fleet per tick; the
-/// value a level buys, and what it costs, are `config::StatUpgrade` tables on `BotConfig`.
-///
-/// Levels are **fleet-wide and immediate**: a bot reads its fleet's level whenever the
-/// engine needs the stat, so a purchase improves every bot already on the field rather than
-/// only the ones built afterwards. That is what keeps upgrades out of `BotState` -- eight
-/// bytes per fleet instead of eight per bot per fleet, in every frame and every diff line.
-#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug, mm_macros::FfiMirror)]
-#[repr(u8)]
-pub enum Upgrade {
-    Speed = 0,
-    Health = 1,
-    TurnSpeed = 2,
-    BlasterCooldown = 3,
-    BlasterRange = 4,
-    BlasterDamage = 5,
-    HealPerTick = 6,
-    ExtractRate = 7,
-}
-
-/// How many upgrades there are, i.e. the length of `FabricatorState::upgrades`.
-pub const UPGRADE_COUNT: usize = 8;
-
-impl Upgrade {
-    pub const ALL: [Upgrade; UPGRADE_COUNT] = [
-        Upgrade::Speed,
-        Upgrade::Health,
-        Upgrade::TurnSpeed,
-        Upgrade::BlasterCooldown,
-        Upgrade::BlasterRange,
-        Upgrade::BlasterDamage,
-        Upgrade::HealPerTick,
-        Upgrade::ExtractRate,
-    ];
-
-    /// The discriminant, i.e. this upgrade's slot in `FabricatorState::upgrades`.
-    pub const fn index(self) -> usize {
-        self as usize
-    }
-
-    /// The value-and-cost table this upgrade buys levels of.
-    pub fn stat(self, conf: &GameConfig) -> &StatUpgrade {
-        match self {
-            Upgrade::Speed => &conf.bot.speed,
-            Upgrade::Health => &conf.bot.health,
-            Upgrade::TurnSpeed => &conf.bot.turn_speed,
-            Upgrade::BlasterCooldown => &conf.bot.blaster_cooldown,
-            Upgrade::BlasterRange => &conf.bot.blaster_range,
-            Upgrade::BlasterDamage => &conf.bot.blaster_damage,
-            Upgrade::HealPerTick => &conf.bot.heal_per_tick,
-            Upgrade::ExtractRate => &conf.bot.extract_rate,
-        }
-    }
-}
-
 pub trait Mirror {
     fn mirror(&mut self, conf: &GameConfig);
 }
@@ -443,17 +388,13 @@ pub struct FleetAction {
     /// The class the fabricator builds next -- for the natural build *and* for a rush
     /// order, which is the same build paid for early.
     pub fabricator_next: BotClass,
-    /// One upgrade to buy this tick, if the fleet can afford the next level of it. An
-    /// unaffordable or already-maxed purchase is a silent no-op: there is no error channel
-    /// back to a bot, so the only report is `FabricatorState` not moving.
-    pub upgrade: StateOption<Upgrade>,
     /// Buy a bot on the spot for `conf.fabricator.rush_cost`, independently of
-    /// `next_bot_creation`. Independent of `upgrade`: a fleet may buy one of each per tick.
+    /// `next_bot_creation`. Refused, and not charged, in the endgame.
     pub rush_order: bool,
 }
 
 impl FleetAction {
-    /// The do-nothing action: no movement, no specials, no purchases, and the fabricator
+    /// The do-nothing action: no movement, no specials, no rush order, and the fabricator
     /// building `BotClass::default()` on its own cadence. Identical to `Default::default()`
     /// -- kept as the name the bot crates and the tests construct through, so what an
     /// "empty" action means stays in one place if a field ever needs a non-zero default.
@@ -467,8 +408,8 @@ impl Mirror for FleetAction {
         self.bots
             .iter_mut()
             .for_each(|bot_action| bot_action.mirror(conf));
-        // `fabricator_next` is a `BotClass`, `upgrade` names a stat and `rush_order` is a
-        // `bool`. None carries a position, a direction or a team, so all three are invariant
+        // `fabricator_next` is a `BotClass` and `rush_order` is a `bool`. Neither carries a
+        // position, a direction or a team, so both are invariant
         // under the 180 degree rotation -- nothing to do here, and nothing to reindex: the
         // fabricator is per-fleet, not per-bot, so the fleet swap in `GameState::mirror`
         // already puts it with the right team.
@@ -694,14 +635,14 @@ impl Mirror for Deposit {
     }
 }
 
-/// Per-fleet economy and build queue: what the fleet has earned, when its next bot arrives,
-/// and what it has bought.
+/// Per-fleet economy and build queue: what the fleet has earned and when its next bot arrives.
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug, Default, mm_macros::FfiMirror)]
 #[cfg_attr(feature = "engine", derive(Diff))]
 #[repr(C)]
 pub struct FabricatorState {
     /// Fleet currency, earned by extractors at `conf.bot.extract_rate` per extractor per
-    /// tick and spent on upgrades and rush orders -- see `action::step_fabricators`.
+    /// tick and spent on rush orders -- see `action::step_fabricators`. Starts at
+    /// `conf.fabricator.starting_tokens`.
     pub tokens: f32,
     /// Absolute tick of the next natural build. Absolute rather than a countdown for the
     /// same reason as `BotState::next_fire_tick`: a countdown would put both fabricators
@@ -711,21 +652,12 @@ pub struct FabricatorState {
     /// timer simply holds and the bot arrives the tick a slot opens, rather than the build
     /// being lost for being full.
     pub next_bot_creation: u32,
-    /// Level of each upgrade, indexed by `Upgrade::index`. A `Diff` leaf: eight bytes that
-    /// move only on the tick a purchase actually lands.
-    pub upgrades: [u8; UPGRADE_COUNT],
-}
-
-impl FabricatorState {
-    pub fn level(&self, up: Upgrade) -> u8 {
-        self.upgrades[up.index()]
-    }
 }
 
 impl Mirror for FabricatorState {
     fn mirror(&mut self, _conf: &GameConfig) {
-        // `tokens` is a scalar, `next_bot_creation` an absolute tick, and `upgrades` a row
-        // of levels -- none of the three has a side. The impl exists so that a field which
+        // `tokens` is a scalar and `next_bot_creation` an absolute tick -- neither has a
+        // side. The impl exists so that a field which
         // *does* have a side cannot be added without this line failing to be enough.
     }
 }
@@ -792,16 +724,26 @@ mod game_state_impl {
                     extractors: TeamPair::new(0, 0),
                 },
                 // `next_bot_creation: 0` -- both fleets get their first bot on tick 0.
-                fabricator_team_a: FabricatorState::default(),
-                fabricator_team_b: FabricatorState::default(),
+                fabricator_team_a: FabricatorState {
+                    tokens: conf.fabricator.starting_tokens,
+                    next_bot_creation: 0,
+                },
+                fabricator_team_b: FabricatorState {
+                    tokens: conf.fabricator.starting_tokens,
+                    next_bot_creation: 0,
+                },
             }
         }
 
-        /// Effective value of `up` for `team`, after that fleet's fabricator upgrades.
-        /// The one place a stat is resolved: every `conf.bot` read that has an upgrade
-        /// goes through here, on both the engine and the bot side.
-        pub fn stat(&self, conf: &GameConfig, team: Team, up: Upgrade) -> f32 {
-            up.stat(conf).at(self.fabricators()[team].level(up))
+        /// Whether the match is in its endgame, the last `conf.endgame_ticks` ticks, during
+        /// which no bot is built.
+        pub fn in_endgame(&self, conf: &GameConfig) -> bool {
+            self.tick >= conf.max_ticks.saturating_sub(conf.endgame_ticks)
+        }
+
+        /// Total current health over `team`'s living bots -- the second endgame tiebreak.
+        pub fn health_pool(&self, team: Team) -> f32 {
+            self.fleets()[team].iter().map(|bot| bot.health).sum()
         }
 
         /// Center of the payload circle. Its radius is `conf.payload.radius`.
@@ -947,7 +889,6 @@ mod validate_test {
         action.bots[1].special_action = SpecialAction::Healer { fire: true, target: 3 };
         action.bots[2].self_destruct = true;
         action.fabricator_next = BotClass::Extractor;
-        action.upgrade = StateOption::Some(Upgrade::Speed);
         action.rush_order = true;
         let raw = unsafe {
             std::slice::from_raw_parts(
@@ -973,19 +914,6 @@ mod validate_test {
         bytes[offset_of!(FleetAction, fabricator_next)] = 9;
         assert!(!FleetAction::validate(&bytes));
 
-        let mut bytes = image();
-        // Nested one level down: the `Upgrade` inside a `StateOption<Upgrade>`'s payload.
-        bytes[offset_of!(FleetAction, upgrade)] = 1; // Some
-        bytes[offset_of!(FleetAction, upgrade) + 1] = 200;
-        assert!(!FleetAction::validate(&bytes));
-    }
-
-    #[test]
-    fn an_undeclared_option_tag_is_rejected() {
-        let mut bytes = image();
-        // `StateOption` is None = 0, Some = 1, and nothing else.
-        bytes[offset_of!(FleetAction, upgrade)] = 2;
-        assert!(!FleetAction::validate(&bytes));
     }
 
     #[test]

@@ -225,9 +225,7 @@ fn reset_bot(
     state: &mut GameState,
     conf: &GameConfig,
 ) {
-    // Resolved before the mutable borrow, and against the *building* fleet's level: a bot
-    // is born at whatever maximum health its fabricator has paid for.
-    let health = state.stat(conf, team, Upgrade::Health);
+    let health = conf.bot.health;
     let fleet = &mut state.fleets_mut()[team];
     let Some(bot) = fleet.get_mut(id) else {
         return;
@@ -278,16 +276,8 @@ fn step_healers(
 ) {
     let range = conf.bot.base_heal_range;
     let half_arc = conf.bot.base_heal_arc_deg / 2.0;
-    // Per-team stats, resolved once per tick rather than once per healer: this is the hot
-    // loop, and a fleet's levels cannot change inside a tick.
-    let heal_rate = TeamPair::new(
-        state.stat(conf, Team::A, Upgrade::HealPerTick),
-        state.stat(conf, Team::B, Upgrade::HealPerTick),
-    );
-    let max_health = TeamPair::new(
-        state.stat(conf, Team::A, Upgrade::Health),
-        state.stat(conf, Team::B, Upgrade::Health),
-    );
+    let heal_rate = conf.bot.heal_per_tick;
+    let max_health = conf.bot.health;
 
     let mut heals: TeamPair<[f32; BOTS_MAX]> = TeamPair::new([0.0; BOTS_MAX], [0.0; BOTS_MAX]);
 
@@ -345,7 +335,7 @@ fn step_healers(
             continue;
         }
 
-        heals[team][target as usize] += heal_rate[team];
+        heals[team][target as usize] += heal_rate;
 
         // Every gate has passed, so this channel is real and renderable. Recorded on the
         // *healer*, not the target: one bot can be healed by several at once, and it is the
@@ -356,11 +346,9 @@ fn step_healers(
     }
 
     for team in TEAMS {
-        let max_health = max_health[team];
-        // A multiple of this fleet's *current* heal rate, so "three healers stack, a fourth
-        // is wasted" holds at every upgrade level -- see `BotConfig::heal_stack_cap`. Both
+        // A multiple of the heal rate -- see `BotConfig::heal_stack_cap`. Both
         // healer and target are in `team`: a healer can only ever name its own fleet.
-        let cap = conf.bot.heal_stack_cap * heal_rate[team];
+        let cap = conf.bot.heal_stack_cap * heal_rate;
         for bot in state.fleets_mut()[team].iter_mut() {
             let amount = heals[team][bot.id as usize];
             if amount <= 0.0 {
@@ -401,19 +389,9 @@ fn step_blasters(
     bot_actions: &[(Team, BotId, &BotAction)],
 ) {
     let tick = state.tick;
-    // Per-team stats, resolved once per tick -- see the note in `step_healers`.
-    let range = TeamPair::new(
-        state.stat(conf, Team::A, Upgrade::BlasterRange),
-        state.stat(conf, Team::B, Upgrade::BlasterRange),
-    );
-    let cooldown = TeamPair::new(
-        state.stat(conf, Team::A, Upgrade::BlasterCooldown) as u32,
-        state.stat(conf, Team::B, Upgrade::BlasterCooldown) as u32,
-    );
-    let damage = TeamPair::new(
-        state.stat(conf, Team::A, Upgrade::BlasterDamage),
-        state.stat(conf, Team::B, Upgrade::BlasterDamage),
-    );
+    let range = conf.bot.blaster_range;
+    let cooldown = conf.bot.blaster_cooldown;
+    let damage = conf.bot.blaster_damage;
 
     // Last tick's beams are stale. Clearing them here is what makes `shot` transient: the
     // `Some` -> `None` transition is itself a diff, so the gamelog self-clears.
@@ -450,7 +428,7 @@ fn step_blasters(
             | ScanMask::WALLS
             | ScanMask::PAYLOAD
             | ScanMask::DEPOSITS;
-        let reach = range[team];
+        let reach = range;
         let point = scan(state, conf, origin, dir, mask, None, reach)
             .map(|hit| hit.point)
             .unwrap_or(origin + dir * reach);
@@ -460,7 +438,7 @@ fn step_blasters(
         let bot = &mut state.fleets_mut()[team][id];
         if let SpecialState::Battle { next_fire_tick, shot } = &mut bot.special {
             *shot = StateOption::Some(point);
-            *next_fire_tick = tick + cooldown[team];
+            *next_fire_tick = tick + cooldown;
         }
     }
 
@@ -471,7 +449,7 @@ fn step_blasters(
                 continue;
             }
             if bot.pos.dist_sq(point) <= splash * splash {
-                bot.health -= damage[*team];
+                bot.health -= damage;
                 // `.max(1)` so that even a config of 0 still blocks the remaining blasts of
                 // this tick -- one blast per bot per tick is a rule, not a tuning knob.
                 bot.invulnerable_until_tick = tick + conf.bot.base_invulnerability_ticks.max(1);
@@ -591,18 +569,14 @@ fn step_extractors(
         state.deposits_mut()[deposit].extractors = new[deposit];
     }
 
-    // Per-team, resolved once -- see the note in `step_healers`.
-    let rate = TeamPair::new(
-        state.stat(conf, Team::A, Upgrade::ExtractRate),
-        state.stat(conf, Team::B, Upgrade::ExtractRate),
-    );
+    let rate = conf.bot.extract_rate;
     for deposit in TEAMS {
         for team in TEAMS {
             let mut bits = new[deposit][team];
             if bits == 0 {
                 continue;
             }
-            state.fabricators_mut()[team].tokens += rate[team] * bits.count_ones() as f32;
+            state.fabricators_mut()[team].tokens += rate * bits.count_ones() as f32;
             while bits != 0 {
                 let id = bits.trailing_zeros() as BotId;
                 bits &= bits - 1;
@@ -639,45 +613,23 @@ fn spawn_bot(team: Team, class: BotClass, state: &mut GameState, conf: &GameConf
 
 /// Runs both fabricators: this tick's purchases, then this tick's builds.
 ///
-/// Order within a fleet is upgrade, then rush, then natural build, and it matters both
-/// times. An upgrade lands before either build, so a bot bought this tick is born at the
-/// health its fleet just paid for. A rush lands before the natural build and pushes the
-/// timer one tick if it was due, so **at most one bot per fleet enters per tick** and the
-/// natural build is deferred rather than swallowed.
+/// Order within a fleet is rush, then natural build. A rush lands before the natural build
+/// and pushes the timer one tick if it was due, so **at most one bot per fleet enters per
+/// tick** and the natural build is deferred rather than swallowed.
 ///
-/// Both purchases spend tokens banked as of last tick: `step_extractors` runs later in
-/// `eval_tick`, so this tick's mining pays for next tick's shopping. Neither purchase can
-/// fail loudly -- there is no error channel back to a bot, so an unaffordable or maxed
-/// request is simply not applied, and `FabricatorState` not moving is the whole report.
+/// A rush spends tokens banked as of last tick: `step_extractors` runs later in
+/// `eval_tick`, so this tick's mining pays for next tick's shopping. It cannot fail loudly
+/// -- there is no error channel back to a bot, so an unaffordable request is simply not
+/// applied, and `FabricatorState` not moving is the whole report.
+///
+/// In the endgame nothing is built at all: a rush is refused without being charged, and
+/// the natural timer is ignored.
 fn step_fabricators(state: &mut GameState, conf: &GameConfig, actions: TeamPair<&FleetAction>) {
+    if state.in_endgame(conf) {
+        return;
+    }
     for team in TEAMS {
         let action = actions[team];
-
-        // --- upgrade ---
-        if let StateOption::Some(up) = action.upgrade {
-            let level = state.fabricators()[team].level(up);
-            // `None` once maxed; `cost * (level + 1)`, so each level of one stat is dearer
-            // than the last.
-            if let Some(cost) = up.stat(conf).cost_of(level) {
-                if state.fabricators()[team].tokens >= cost {
-                    let fabricator = &mut state.fabricators_mut()[team];
-                    fabricator.tokens -= cost;
-                    fabricator.upgrades[up.index()] = level + 1;
-
-                    // Health is the one stat whose upgrade is not read afresh every tick:
-                    // a living bot carries a current health that the new ceiling would
-                    // otherwise leave behind. Every bot on the field gains the delta, so a
-                    // 7/10 bot becomes 9/12 -- headroom *and* the health to fill it, but
-                    // not a free top-up to full.
-                    if matches!(up, Upgrade::Health) {
-                        let delta = up.stat(conf).at(level + 1) - up.stat(conf).at(level);
-                        for bot in state.fleets_mut()[team].iter_mut() {
-                            bot.health += delta;
-                        }
-                    }
-                }
-            }
-        }
 
         // --- rush order ---
         // A rush is the natural build bought early: same class, same spawn, just paid for.
@@ -760,8 +712,7 @@ pub fn eval_tick(
     with_rng(|rng| bot_actions.shuffle(rng));
     let bot_actions = bot_actions;
 
-    // fabrication -- first, so an upgrade bought this tick is in force for this tick's own
-    // movement, shooting and healing rather than only from the next one.
+    // fabrication -- first, so a bot bought this tick is in the world for every step below.
     //
     // After `bot_actions` is frozen, deliberately: a bot built this tick has no action of
     // its own, since the fleet chose its actions without knowing which slot the new bot
@@ -775,19 +726,12 @@ pub fn eval_tick(
 
     // movement
 
-    // Per-team stats, resolved once per tick -- see the note in `step_healers`.
-    let speed = TeamPair::new(
-        state.stat(conf, Team::A, Upgrade::Speed),
-        state.stat(conf, Team::B, Upgrade::Speed),
-    );
-    let turn_speed = TeamPair::new(
-        state.stat(conf, Team::A, Upgrade::TurnSpeed),
-        state.stat(conf, Team::B, Upgrade::TurnSpeed),
-    );
+    let speed = conf.bot.speed;
+    let turn_speed = conf.bot.turn_speed;
 
     for (team, id, action) in &bot_actions {
-        let max_turn_speed = turn_speed[*team];
-        let vel = action.move_action.direction * speed[*team];
+        let max_turn_speed = turn_speed;
+        let vel = action.move_action.direction * speed;
         let bot = &mut state.fleets_mut()[*team][*id];
 
         bot.pos += vel;
@@ -837,6 +781,88 @@ pub fn eval_tick(
     state.tick += 1;
 }
 
+/// Why a match ended. Engine-only: bots are never told, and nothing in `GameState` carries it.
+#[derive(serde::Serialize, Clone, Copy, PartialEq, Eq, Debug)]
+#[serde(rename_all = "snake_case")]
+pub enum EndReason {
+    /// The payload reached the end of its track; the team whose goal it is loses.
+    Payload,
+    /// A fleet had no bots left during the endgame; the other fleet wins.
+    Elimination,
+    /// Tiebreak 1: the payload is on the loser's side of center.
+    PayloadProgress,
+    /// Tiebreak 2: larger total health over living bots.
+    HealthPool,
+    /// Tiebreak 3: more tokens banked.
+    Tokens,
+    /// Every tiebreak was level.
+    Tie,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct MatchResult {
+    /// `None` only for `EndReason::Tie`.
+    pub winner: Option<Team>,
+    pub reason: EndReason,
+}
+
+/// Whether the match is over after the tick just evaluated, and if so who won.
+///
+/// Checked in order: a payload at either goal ends the match at any time; in the endgame,
+/// a fleet with no bots loses (both fleets empty on the same tick goes to the tiebreaks);
+/// and once `max_ticks` is reached, the tiebreaks decide it.
+pub fn match_result(state: &GameState, conf: &GameConfig) -> Option<MatchResult> {
+    // `capture == 1.0` is team B's goal, so B has lost; `-1.0` is A's.
+    if state.capture >= 1.0 {
+        return Some(MatchResult { winner: Some(Team::A), reason: EndReason::Payload });
+    }
+    if state.capture <= -1.0 {
+        return Some(MatchResult { winner: Some(Team::B), reason: EndReason::Payload });
+    }
+
+    if state.in_endgame(conf) {
+        let fleets = state.fleets();
+        match (fleets[Team::A].len == 0, fleets[Team::B].len == 0) {
+            (true, true) => return Some(tiebreak(state)),
+            (true, false) => {
+                return Some(MatchResult { winner: Some(Team::B), reason: EndReason::Elimination })
+            }
+            (false, true) => {
+                return Some(MatchResult { winner: Some(Team::A), reason: EndReason::Elimination })
+            }
+            (false, false) => {}
+        }
+    }
+
+    (state.tick >= conf.max_ticks).then(|| tiebreak(state))
+}
+
+/// Payload side, then health pool, then tokens, then a tie.
+fn tiebreak(state: &GameState) -> MatchResult {
+    use std::cmp::Ordering;
+    let fabricators = state.fabricators();
+    let steps = [
+        // Positive `capture` sits on team B's side, which is A ahead.
+        (state.capture.total_cmp(&0.0), EndReason::PayloadProgress),
+        (
+            state.health_pool(Team::A).total_cmp(&state.health_pool(Team::B)),
+            EndReason::HealthPool,
+        ),
+        (
+            fabricators[Team::A].tokens.total_cmp(&fabricators[Team::B].tokens),
+            EndReason::Tokens,
+        ),
+    ];
+    for (ordering, reason) in steps {
+        match ordering {
+            Ordering::Greater => return MatchResult { winner: Some(Team::A), reason },
+            Ordering::Less => return MatchResult { winner: Some(Team::B), reason },
+            Ordering::Equal => {}
+        }
+    }
+    MatchResult { winner: None, reason: EndReason::Tie }
+}
+
 #[cfg(test)]
 mod blaster_test {
     use super::*;
@@ -855,22 +881,23 @@ mod blaster_test {
     fn conf() -> GameConfig {
         GameConfig {
             max_ticks: 100,
+            endgame_ticks: 0,
             bot: BotConfig {
                 radius: 0.75,
-                speed: StatUpgrade { value: [0.1 as f32; UPGRADE_LEVELS], cost: 0.0 },
-                health: StatUpgrade { value: [HEALTH as f32; UPGRADE_LEVELS], cost: 0.0 },
-                turn_speed: StatUpgrade { value: [10.0 as f32; UPGRADE_LEVELS], cost: 0.0 },
-                blaster_cooldown: StatUpgrade { value: [COOLDOWN as f32; UPGRADE_LEVELS], cost: 0.0 },
+                speed: 0.1,
+                health: HEALTH as f32,
+                turn_speed: 10.0,
+                blaster_cooldown: COOLDOWN as u32,
                 base_invulnerability_ticks: INVULN,
-                blaster_range: StatUpgrade { value: [RANGE as f32; UPGRADE_LEVELS], cost: 0.0 },
-                blaster_damage: StatUpgrade { value: [DAMAGE as f32; UPGRADE_LEVELS], cost: 0.0 },
+                blaster_range: RANGE as f32,
+                blaster_damage: DAMAGE as f32,
                 base_blaster_splash_radius: 0.3,
-                heal_per_tick: StatUpgrade { value: [HEAL as f32; UPGRADE_LEVELS], cost: 0.0 },
+                heal_per_tick: HEAL as f32,
                 base_heal_range: HEAL_RANGE,
                 base_heal_arc_deg: HEAL_ARC,
                 heal_stack_cap: (HEAL_CAP) / (HEAL),
                 base_extract_range: 5.0,
-                extract_rate: StatUpgrade { value: [0.1 as f32; UPGRADE_LEVELS], cost: 0.0 },
+                extract_rate: 0.1,
             },
             payload: PayloadConfig {
                 radius: 1.5,
@@ -885,7 +912,7 @@ mod blaster_test {
                 radius: 0.0,
                 extractor_cap: 16,
             },
-            fabricator: FabricatorConfig { interval: 100, rush_cost: 10.0 },
+            fabricator: FabricatorConfig { interval: 100, rush_cost: 10.0, starting_tokens: 0.0 },
             map: [[MapTile::Empty; MAP_SIZE]; MAP_SIZE],
         }
     }
@@ -1253,22 +1280,23 @@ mod healer_test {
     fn conf() -> GameConfig {
         GameConfig {
             max_ticks: 100,
+            endgame_ticks: 0,
             bot: BotConfig {
                 radius: 0.75,
-                speed: StatUpgrade { value: [0.1 as f32; UPGRADE_LEVELS], cost: 0.0 },
-                health: StatUpgrade { value: [HEALTH as f32; UPGRADE_LEVELS], cost: 0.0 },
-                turn_speed: StatUpgrade { value: [10.0 as f32; UPGRADE_LEVELS], cost: 0.0 },
-                blaster_cooldown: StatUpgrade { value: [60 as f32; UPGRADE_LEVELS], cost: 0.0 },
+                speed: 0.1,
+                health: HEALTH as f32,
+                turn_speed: 10.0,
+                blaster_cooldown: 60,
                 base_invulnerability_ticks: 15,
-                blaster_range: StatUpgrade { value: [10.0 as f32; UPGRADE_LEVELS], cost: 0.0 },
-                blaster_damage: StatUpgrade { value: [3.0 as f32; UPGRADE_LEVELS], cost: 0.0 },
+                blaster_range: 10.0,
+                blaster_damage: 3.0,
                 base_blaster_splash_radius: 0.3,
-                heal_per_tick: StatUpgrade { value: [HEAL as f32; UPGRADE_LEVELS], cost: 0.0 },
+                heal_per_tick: HEAL as f32,
                 base_heal_range: RANGE,
                 base_heal_arc_deg: ARC,
                 heal_stack_cap: (CAP) / (HEAL),
                 base_extract_range: 5.0,
-                extract_rate: StatUpgrade { value: [0.1 as f32; UPGRADE_LEVELS], cost: 0.0 },
+                extract_rate: 0.1,
             },
             payload: PayloadConfig {
                 radius: 1.5,
@@ -1283,7 +1311,7 @@ mod healer_test {
                 radius: 0.0,
                 extractor_cap: 16,
             },
-            fabricator: FabricatorConfig { interval: 100, rush_cost: 10.0 },
+            fabricator: FabricatorConfig { interval: 100, rush_cost: 10.0, starting_tokens: 0.0 },
             map: [[MapTile::Empty; MAP_SIZE]; MAP_SIZE],
         }
     }
@@ -1635,7 +1663,7 @@ mod healer_test {
     #[test]
     fn healing_resolves_before_damage() {
         let mut conf = conf();
-        conf.bot.blaster_damage.value = [0.6; UPGRADE_LEVELS];
+        conf.bot.blaster_damage = 0.6;
         let conf = conf;
 
         let mut s = state(&conf);
@@ -1704,35 +1732,29 @@ mod fabricator_test {
 
     const INTERVAL: u32 = 100;
     const RUSH_COST: f32 = 10.0;
-    /// `health` and `blaster_damage` are the two stats with a real table here, so the
-    /// upgrade tests can watch a value actually move. Level `n` of either costs `cost * n`.
-    const HEALTH_COST: f32 = 20.0;
+    const MAX_TICKS: u32 = 1000;
+    const ENDGAME_TICKS: u32 = 100;
 
     fn conf() -> GameConfig {
         GameConfig {
-            max_ticks: 100,
+            max_ticks: MAX_TICKS,
+            endgame_ticks: ENDGAME_TICKS,
             bot: BotConfig {
                 radius: 0.75,
-                speed: StatUpgrade { value: [0.1; UPGRADE_LEVELS], cost: 0.0 },
-                health: StatUpgrade {
-                    value: [10.0, 12.0, 14.0, 16.0, 18.0],
-                    cost: HEALTH_COST,
-                },
-                turn_speed: StatUpgrade { value: [10.0; UPGRADE_LEVELS], cost: 0.0 },
-                blaster_cooldown: StatUpgrade { value: [60.0; UPGRADE_LEVELS], cost: 0.0 },
+                speed: 0.1,
+                health: 10.0,
+                turn_speed: 10.0,
+                blaster_cooldown: 60,
                 base_invulnerability_ticks: 15,
-                blaster_range: StatUpgrade { value: [10.0; UPGRADE_LEVELS], cost: 0.0 },
-                blaster_damage: StatUpgrade {
-                    value: [3.0, 4.0, 5.0, 6.0, 7.0],
-                    cost: 5.0,
-                },
+                blaster_range: 10.0,
+                blaster_damage: 3.0,
                 base_blaster_splash_radius: 0.3,
-                heal_per_tick: StatUpgrade { value: [0.05; UPGRADE_LEVELS], cost: 0.0 },
+                heal_per_tick: 0.05,
                 base_heal_range: 3.0,
                 base_heal_arc_deg: 90.0,
                 heal_stack_cap: 3.0,
                 base_extract_range: 5.0,
-                extract_rate: StatUpgrade { value: [0.1; UPGRADE_LEVELS], cost: 0.0 },
+                extract_rate: 0.1,
             },
             payload: PayloadConfig {
                 radius: 1.5,
@@ -1747,7 +1769,7 @@ mod fabricator_test {
                 radius: 0.0,
                 extractor_cap: 16,
             },
-            fabricator: FabricatorConfig { interval: INTERVAL, rush_cost: RUSH_COST },
+            fabricator: FabricatorConfig { interval: INTERVAL, rush_cost: RUSH_COST, starting_tokens: 0.0 },
             map: [[MapTile::Empty; MAP_SIZE]; MAP_SIZE],
         }
     }
@@ -1763,12 +1785,6 @@ mod fabricator_test {
             s.fabricators_mut()[team].tokens = tokens;
         }
         s
-    }
-
-    fn buy(up: Upgrade) -> FleetAction {
-        let mut action = FleetAction::new();
-        action.upgrade = StateOption::Some(up);
-        action
     }
 
     fn rush() -> FleetAction {
@@ -1799,102 +1815,6 @@ mod fabricator_test {
             }
         }
     }
-    #[test]
-    fn an_upgrade_debits_its_price_and_raises_the_level() {
-        let conf = conf();
-        let mut s = started(&conf, 1000.0);
-
-        // Level 1 costs `cost * 1`, level 2 `cost * 2` -- linear in the level, so each
-        // level of one stat is dearer than the last.
-        for level in 1..UPGRADE_LEVELS as u8 {
-            let before = s.fabricators()[Team::A].tokens;
-            eval_tick(&mut s, &conf, buy(Upgrade::Health), FleetAction::new());
-
-            let fab = &s.fabricators()[Team::A];
-            assert_eq!(fab.level(Upgrade::Health), level);
-            assert_eq!(before - fab.tokens, HEALTH_COST * level as f32);
-        }
-
-        // Maxed: the next request is a no-op, and costs nothing.
-        let before = s.fabricators()[Team::A].tokens;
-        eval_tick(&mut s, &conf, buy(Upgrade::Health), FleetAction::new());
-        assert_eq!(
-            s.fabricators()[Team::A].level(Upgrade::Health),
-            UPGRADE_LEVELS as u8 - 1
-        );
-        assert_eq!(s.fabricators()[Team::A].tokens, before);
-
-        // Team B never asked for anything, and upgrades are per fleet.
-        assert_eq!(s.fabricators()[Team::B].level(Upgrade::Health), 0);
-    }
-
-    #[test]
-    fn an_unaffordable_upgrade_is_a_silent_no_op() {
-        let conf = conf();
-        let mut s = started(&conf, HEALTH_COST - 1.0);
-
-        eval_tick(&mut s, &conf, buy(Upgrade::Health), FleetAction::new());
-
-        let fab = &s.fabricators()[Team::A];
-        assert_eq!(fab.level(Upgrade::Health), 0, "nothing bought");
-        assert_eq!(fab.tokens, HEALTH_COST - 1.0, "and nothing spent");
-    }
-
-    #[test]
-    fn a_health_upgrade_tops_up_the_living_by_the_delta_not_to_full() {
-        let conf = conf();
-        let mut s = started(&conf, 1000.0);
-
-        let id = s.fleets()[Team::A].iter().next().unwrap().id;
-        s.fleets_mut()[Team::A][id].health = 4.0;
-
-        eval_tick(&mut s, &conf, buy(Upgrade::Health), FleetAction::new());
-
-        // 10 -> 12 is a delta of 2, so a 4/10 bot becomes 6/12: headroom and the health to
-        // fill it, but not a free heal up to the new maximum.
-        assert_eq!(s.fleets()[Team::A][id].health, 6.0);
-        assert_eq!(s.stat(&conf, Team::A, Upgrade::Health), 12.0);
-    }
-
-    #[test]
-    fn an_upgrade_reaches_bots_that_predate_it() {
-        let conf = conf();
-        let mut s = started(&conf, 1000.0);
-
-        // A shooter built at tick 0 and a target with exactly enough health to survive a
-        // level-0 blast. Both predate any purchase.
-        let shooter = s.fleets()[Team::A].iter().next().unwrap().id;
-        s.fleets_mut()[Team::A][shooter].pos = Vec2::new(5.0, 16.0);
-        s.fleets_mut()[Team::A][shooter].angle = 0.0;
-
-        let target = s.fleets_mut()[Team::B].add();
-        reset_bot(Team::B, target, Vec2::new(10.0, 16.0), BotClass::Battle, &mut s, &conf);
-        s.fleets_mut()[Team::B][target].health = 3.5;
-
-        let mut fire = FleetAction::new();
-        fire.bots[shooter as usize].special_action = SpecialAction::Battle { fire: true };
-        fire.bots[shooter as usize].turn_action = TurnAction::TargetRotation { deg: 0.0 };
-
-        // Level 0 deals 3.0 and leaves it standing.
-        eval_tick(&mut s, &conf, fire.clone(), FleetAction::new());
-        assert_eq!(s.fleets()[Team::B][target].health, 0.5);
-
-        // Buy a level, wait out the cooldown, and the same shooter now deals 4.0 -- enough
-        // to finish a bot it could not kill before. Levels live on the fleet, not the bot.
-        s.fleets_mut()[Team::B][target].health = 3.5;
-        eval_tick(&mut s, &conf, buy(Upgrade::BlasterDamage), FleetAction::new());
-        while s.fleets()[Team::A][shooter].next_fire_tick() > s.tick {
-            eval_tick(&mut s, &conf, FleetAction::new(), FleetAction::new());
-        }
-        s.fleets_mut()[Team::B][target].invulnerable_until_tick = 0;
-
-        eval_tick(&mut s, &conf, fire, FleetAction::new());
-        assert!(
-            s.fleets()[Team::B].get(target).is_none(),
-            "the upgraded blaster killed a target the base one could not"
-        );
-    }
-
     #[test]
     fn the_natural_timer_fires_on_the_interval() {
         let conf = conf();
@@ -1997,19 +1917,153 @@ mod fabricator_test {
         );
     }
 
+    /// A state parked on the first tick of the endgame, with `tokens` in both fabricators.
+    fn in_endgame(conf: &GameConfig, tokens: f32) -> GameState {
+        let mut s = started(conf, tokens);
+        s.tick = conf.max_ticks - conf.endgame_ticks;
+        s
+    }
+
     #[test]
-    fn a_bot_is_born_at_the_health_its_fleet_has_just_paid_for() {
+    fn both_fleets_start_with_the_configured_tokens() {
+        let mut conf = conf();
+        conf.fabricator.starting_tokens = 16.0 * RUSH_COST;
+        let s = GameState::new(&conf);
+        for team in TEAMS {
+            assert_eq!(s.fabricators()[team].tokens, 16.0 * RUSH_COST);
+        }
+    }
+
+    #[test]
+    fn nothing_is_built_in_the_endgame() {
         let conf = conf();
-        let mut s = started(&conf, 1000.0);
+        let mut s = in_endgame(&conf, RUSH_COST);
+        assert!(s.in_endgame(&conf));
+        s.fabricators_mut()[Team::A].next_bot_creation = s.tick;
+        let before = s.fleets()[Team::A].len;
 
-        // The upgrade resolves before either build in the same tick, so the rushed bot is
-        // born at the new maximum rather than the old one.
-        let mut action = rush();
-        action.upgrade = StateOption::Some(Upgrade::Health);
-        eval_tick(&mut s, &conf, action, FleetAction::new());
+        eval_tick(&mut s, &conf, rush(), FleetAction::new());
+        assert_eq!(s.fleets()[Team::A].len, before, "neither the rush nor the timer builds");
+        assert_eq!(s.fabricators()[Team::A].tokens, RUSH_COST, "and the rush is not charged");
+    }
 
-        let newest = s.fleets()[Team::A].iter().last().unwrap();
-        assert_eq!(newest.health, 12.0);
+    #[test]
+    fn the_last_tick_before_the_endgame_still_builds() {
+        let conf = conf();
+        let mut s = in_endgame(&conf, RUSH_COST);
+        s.tick -= 1;
+        assert!(!s.in_endgame(&conf));
+        let before = s.fleets()[Team::A].len;
+
+        eval_tick(&mut s, &conf, rush(), FleetAction::new());
+        assert_eq!(s.fleets()[Team::A].len, before + 1);
+    }
+}
+
+#[cfg(test)]
+mod match_result_test {
+    use super::*;
+    use crate::game::config::test_conf;
+
+    const MAX_TICKS: u32 = 900;
+    const ENDGAME_TICKS: u32 = 300;
+
+    fn conf() -> GameConfig {
+        let mut conf = test_conf::conf().clone();
+        conf.max_ticks = MAX_TICKS;
+        conf.endgame_ticks = ENDGAME_TICKS;
+        conf
+    }
+
+    /// A state at `tick` with one full-health bot in each fleet, the payload at center and
+    /// equal tokens.
+    fn state(conf: &GameConfig, tick: u32) -> GameState {
+        let mut s = GameState::new(conf);
+        s.tick = tick;
+        for team in TEAMS {
+            let id = s.fleets_mut()[team].add();
+            reset_bot(team, id, Vec2::new(16.0, 16.0), BotClass::Battle, &mut s, conf);
+        }
+        s
+    }
+
+    fn remove_one(s: &mut GameState, team: Team) {
+        let id = s.fleets()[team].iter().next().unwrap().id;
+        s.fleets_mut()[team].remove(id);
+    }
+
+    fn result(winner: Option<Team>, reason: EndReason) -> Option<MatchResult> {
+        Some(MatchResult { winner, reason })
+    }
+
+    #[test]
+    fn a_match_in_progress_has_no_result() {
+        let conf = conf();
+        assert_eq!(match_result(&state(&conf, 10), &conf), None);
+        assert_eq!(match_result(&state(&conf, MAX_TICKS - 1), &conf), None);
+    }
+
+    #[test]
+    fn a_payload_at_a_goal_loses_that_team_the_match_at_any_time() {
+        let conf = conf();
+        let mut s = state(&conf, 10);
+        s.capture = 1.0;
+        assert_eq!(match_result(&s, &conf), result(Some(Team::A), EndReason::Payload));
+        s.capture = -1.0;
+        assert_eq!(match_result(&s, &conf), result(Some(Team::B), EndReason::Payload));
+
+        // ...and it outranks a wipe on the same tick.
+        s.tick = MAX_TICKS - ENDGAME_TICKS;
+        remove_one(&mut s, Team::B);
+        assert_eq!(match_result(&s, &conf), result(Some(Team::B), EndReason::Payload));
+    }
+
+    #[test]
+    fn an_empty_fleet_loses_only_in_the_endgame() {
+        let conf = conf();
+        let endgame = MAX_TICKS - ENDGAME_TICKS;
+
+        let mut s = state(&conf, endgame - 1);
+        remove_one(&mut s, Team::A);
+        assert_eq!(match_result(&s, &conf), None, "before the endgame a fleet can rebuild");
+
+        s.tick = endgame;
+        assert_eq!(match_result(&s, &conf), result(Some(Team::B), EndReason::Elimination));
+    }
+
+    #[test]
+    fn a_double_wipe_goes_straight_to_the_tiebreaks() {
+        let conf = conf();
+        let mut s = state(&conf, MAX_TICKS - ENDGAME_TICKS);
+        remove_one(&mut s, Team::A);
+        remove_one(&mut s, Team::B);
+        s.capture = -0.5;
+        assert_eq!(match_result(&s, &conf), result(Some(Team::B), EndReason::PayloadProgress));
+    }
+
+    #[test]
+    fn the_tiebreaks_run_payload_then_health_then_tokens_then_tie() {
+        let conf = conf();
+        let mut s = state(&conf, MAX_TICKS);
+
+        s.capture = 0.25;
+        assert_eq!(match_result(&s, &conf), result(Some(Team::A), EndReason::PayloadProgress));
+        s.capture = -0.25;
+        assert_eq!(match_result(&s, &conf), result(Some(Team::B), EndReason::PayloadProgress));
+
+        s.capture = 0.0;
+        assert_eq!(match_result(&s, &conf), result(None, EndReason::Tie));
+
+        s.fabricators_mut()[Team::A].tokens += 1.0;
+        assert_eq!(match_result(&s, &conf), result(Some(Team::A), EndReason::Tokens));
+
+        let id = s.fleets()[Team::A].iter().next().unwrap().id;
+        s.fleets_mut()[Team::A][id].health -= 1.0;
+        assert_eq!(
+            match_result(&s, &conf),
+            result(Some(Team::B), EndReason::HealthPool),
+            "health outranks tokens"
+        );
     }
 }
 
@@ -2024,22 +2078,23 @@ mod wall_collision_test {
     fn conf() -> GameConfig {
         GameConfig {
             max_ticks: 100,
+            endgame_ticks: 0,
             bot: BotConfig {
                 radius: R,
-                speed: StatUpgrade { value: [0.1 as f32; UPGRADE_LEVELS], cost: 0.0 },
-                health: StatUpgrade { value: [10.0 as f32; UPGRADE_LEVELS], cost: 0.0 },
-                turn_speed: StatUpgrade { value: [10.0 as f32; UPGRADE_LEVELS], cost: 0.0 },
-                blaster_cooldown: StatUpgrade { value: [60 as f32; UPGRADE_LEVELS], cost: 0.0 },
+                speed: 0.1,
+                health: 10.0,
+                turn_speed: 10.0,
+                blaster_cooldown: 60,
                 base_invulnerability_ticks: 15,
-                blaster_range: StatUpgrade { value: [10.0 as f32; UPGRADE_LEVELS], cost: 0.0 },
-                blaster_damage: StatUpgrade { value: [3.0 as f32; UPGRADE_LEVELS], cost: 0.0 },
+                blaster_range: 10.0,
+                blaster_damage: 3.0,
                 base_blaster_splash_radius: 0.3,
-                heal_per_tick: StatUpgrade { value: [0.05 as f32; UPGRADE_LEVELS], cost: 0.0 },
+                heal_per_tick: 0.05,
                 base_heal_range: 3.0,
                 base_heal_arc_deg: 90.0,
                 heal_stack_cap: (0.15) / (0.05),
                 base_extract_range: 5.0,
-                extract_rate: StatUpgrade { value: [0.1 as f32; UPGRADE_LEVELS], cost: 0.0 },
+                extract_rate: 0.1,
             },
             payload: PayloadConfig {
                 radius: 1.5,
@@ -2054,7 +2109,7 @@ mod wall_collision_test {
                 radius: 0.0,
                 extractor_cap: 16,
             },
-            fabricator: FabricatorConfig { interval: 100, rush_cost: 10.0 },
+            fabricator: FabricatorConfig { interval: 100, rush_cost: 10.0, starting_tokens: 0.0 },
             map: [[MapTile::Empty; MAP_SIZE]; MAP_SIZE],
         }
     }
@@ -2261,7 +2316,7 @@ mod wall_collision_test {
             let start = Vec2::new(2.0 + i as f32 * 4.0, 2.0);
             let id = spawn(&mut s, &conf, Team::A, start);
             for _ in 0..400 {
-                s.fleets_mut()[Team::A][id].pos += *dir * conf.bot.speed.value[0];
+                s.fleets_mut()[Team::A][id].pos += *dir * conf.bot.speed;
                 let before = s.fleets()[Team::A][id].pos;
                 assert!(
                     handle_collision(&mut s, &conf),
@@ -2289,22 +2344,23 @@ mod extractor_test {
     fn conf() -> GameConfig {
         GameConfig {
             max_ticks: 100,
+            endgame_ticks: 0,
             bot: BotConfig {
                 radius: 0.25,
-                speed: StatUpgrade { value: [0.1 as f32; UPGRADE_LEVELS], cost: 0.0 },
-                health: StatUpgrade { value: [10.0 as f32; UPGRADE_LEVELS], cost: 0.0 },
-                turn_speed: StatUpgrade { value: [10.0 as f32; UPGRADE_LEVELS], cost: 0.0 },
-                blaster_cooldown: StatUpgrade { value: [60 as f32; UPGRADE_LEVELS], cost: 0.0 },
+                speed: 0.1,
+                health: 10.0,
+                turn_speed: 10.0,
+                blaster_cooldown: 60,
                 base_invulnerability_ticks: 15,
-                blaster_range: StatUpgrade { value: [10.0 as f32; UPGRADE_LEVELS], cost: 0.0 },
-                blaster_damage: StatUpgrade { value: [3.0 as f32; UPGRADE_LEVELS], cost: 0.0 },
+                blaster_range: 10.0,
+                blaster_damage: 3.0,
                 base_blaster_splash_radius: 0.3,
-                heal_per_tick: StatUpgrade { value: [0.05 as f32; UPGRADE_LEVELS], cost: 0.0 },
+                heal_per_tick: 0.05,
                 base_heal_range: 3.0,
                 base_heal_arc_deg: 90.0,
                 heal_stack_cap: (0.15) / (0.05),
                 base_extract_range: RANGE,
-                extract_rate: StatUpgrade { value: [RATE as f32; UPGRADE_LEVELS], cost: 0.0 },
+                extract_rate: RATE as f32,
             },
             payload: PayloadConfig {
                 radius: 1.5,
@@ -2318,7 +2374,7 @@ mod extractor_test {
                 radius: 1.0,
                 extractor_cap: CAP,
             },
-            fabricator: FabricatorConfig { interval: 100, rush_cost: 10.0 },
+            fabricator: FabricatorConfig { interval: 100, rush_cost: 10.0, starting_tokens: 0.0 },
             map: [[MapTile::Empty; MAP_SIZE]; MAP_SIZE],
         }
     }
