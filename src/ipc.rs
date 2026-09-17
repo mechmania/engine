@@ -7,7 +7,7 @@ use std::{
     ops::Drop,
     path::Path,
     sync::OnceLock,
-    sync::atomic::{AtomicU8, Ordering},
+    sync::atomic::{AtomicI64, AtomicU64, AtomicU8, Ordering},
     time::{Duration, Instant},
 };
 use crate::game::{
@@ -32,6 +32,17 @@ pub struct HandshakeRequest{
 
 // very high security we hardcode the magic number into our source code
 pub const HANDSHAKE_MAGIC: u64 = 0xabe119c019aaffcc;
+
+/// The compute bank a bot starts with, and its ceiling, in "ticks" -- multiples of the
+/// engine's own recent per-tick CPU cost. See `crate::timing::ComputeBudget`.
+///
+/// Declared here rather than in `timing.rs` because this file is hardlinked into every Rust
+/// bot crate and `timing.rs` is not: a bot that wants to know how much of its bank is left
+/// needs the size of the bank to compare against, and duplicating the number in the
+/// starterpacks is exactly the drift the hardlink exists to prevent.
+pub const COMPUTE_BANK_TICKS: i64 = 500_000;
+/// What the bank refills by every tick, spent or sat out. Also in "ticks".
+pub const COMPUTE_REFILL_TICKS: i64 = 600;
 
 mm_macros::protocols! {
     Handshake: (HandshakeRequest, u64), // TODO handshake should really not be its own protocol
@@ -102,6 +113,13 @@ pub(in super) struct SharedBlock {
     // exchange (same pattern as `frame` below) — the bot's self-measured CPU time (see
     // `BotChannel::handle_request`) spent producing the response currently in `frame`.
     pub cpu_time_nanos: u64,
+    // The other direction: written by the engine before it hands the turn over, read by the
+    // bot once it has taken it, synchronized by the same exchange. The bot's remaining bank
+    // and what its previous tick cost, both in "ticks" -- everything it needs to know what it
+    // can afford, which it cannot work out for itself because the engine's own per-tick cost
+    // (the unit) never crosses the channel.
+    pub budget_remaining: i64,
+    pub budget_last_charge: u64,
     pub frame: Frame,
 }
 
@@ -120,14 +138,20 @@ pub(in super) enum Handed {
 
 /// Polls the handoff byte until it reads `until`, the peer closes, or `timeout` passes.
 ///
-/// A pure spin, with no yield and no sleep. The obvious alternative, spinning briefly and
-/// then backing off on `tokio::time::sleep`, is quantised to the OS timer: ~1ms on Linux,
-/// but 15.6ms on Windows, whatever the sleep asks for. Once one handoff lands on that
-/// timer, the next peer is asleep when its turn comes, and the match locks into ~60ms a
-/// tick (433s for 7200 ticks, against ~1s here). The cost is a core per waiter for as long
-/// as it waits.
+/// Never sleeps. Sleeping, even briefly after a spin, is quantised to the OS timer: ~1ms on
+/// Linux, but 15.6ms on Windows, whatever the sleep asks for. Once one handoff lands on
+/// that timer, the next peer is asleep when its turn comes, and the match locks into ~60ms
+/// a tick (433s for 7200 ticks, against ~1s here).
 ///
-/// Because the loop never yields, the timeout cannot be a `tokio::time::timeout` around
+/// Off Windows, every pass also calls `yield_now`.
+/// A pure spin keeps a core busy per waiter, so a machine running several matches at once
+/// has more spinning threads than cores, and the one with real work to do is left waiting
+/// for a timeslice (4 matches on 8 threads: 6.7s a match, against 1.7s yielding). `sched_yield`
+/// involves no timer: with nothing else runnable it returns at once, and otherwise it hands
+/// the core to whoever needs it. Spinning a while before the first yield measured slower, not
+/// faster. Windows keeps the pure spin.
+///
+/// Because the loop never awaits, the timeout cannot be a `tokio::time::timeout` around
 /// it -- that future would never be polled again -- so the deadline is checked here, on
 /// every iteration. `None` waits for as long as it takes, which is what a bot wants.
 #[inline(never)]
@@ -146,6 +170,8 @@ pub(in super) fn await_handoff(handoff: &AtomicU8, until: u8, timeout: Option<Du
             }
         }
         std::hint::spin_loop();
+        #[cfg(not(windows))]
+        std::thread::yield_now();
     }
 }
 
@@ -187,10 +213,26 @@ impl EngineChannel {
         handoff_byte(&self.mmap).store(Handoff::Closed as u8, Ordering::Release);
     }
 
+    /// Tells the bot what it has left to spend, ahead of the tick it is about to be handed.
+    ///
+    /// Written before the `request` below stores the handoff byte, so the same release/acquire
+    /// exchange that publishes `frame` publishes these too -- there is no second
+    /// synchronization to get wrong.
+    pub fn set_budget(&self, remaining: i64, last_charge: u64) {
+        unsafe {
+            let ptr = self.mmap.as_ptr();
+            *(ptr.add(offset_of!(SharedBlock, budget_remaining)) as *mut i64) = remaining;
+            *(ptr.add(offset_of!(SharedBlock, budget_last_charge)) as *mut u64) = last_charge;
+        }
+    }
+
     /// Sends `request` and awaits the bot's response, subject to a wall-clock `timeout` (a hang
     /// safety net — see `crate::timing::TICK_HANG_TIMEOUT`). Returns the response alongside
     /// the CPU time the bot itself reported spending to produce it.
-    pub async fn request<T: Protocol>(&self, request: &T::Request, timeout: Duration) -> ResponseResult<(T::Response, Duration)> {
+    ///
+    /// `None` waits for as long as the bot takes: that is `--no-time-limit`, for a competitor
+    /// stepping through a tick in a debugger. A real match always passes `Some`.
+    pub async fn request<T: Protocol>(&self, request: &T::Request, timeout: Option<Duration>) -> ResponseResult<(T::Response, Duration)> {
         let ptr = self.mmap.as_ptr();
         let handoff = handoff_byte(&self.mmap);
 
@@ -217,7 +259,7 @@ impl EngineChannel {
 
         handoff.store(Handoff::BotTurn as u8, Ordering::Release);
 
-        match await_handoff(handoff, Handoff::EngineTurn as u8, Some(timeout)) {
+        match await_handoff(handoff, Handoff::EngineTurn as u8, timeout) {
             Handed::Turn => {}
             Handed::TimedOut => {
                 handoff.store(Handoff::EngineTurn as u8, Ordering::Release);
@@ -288,6 +330,52 @@ static CONFIG: OnceLock<GameConfig> = OnceLock::new();
 
 pub fn get_config() -> &'static GameConfig {
     CONFIG.get().expect("get_config() was called before the handshake")
+}
+
+/// What a bot has left to spend, as of the tick it is currently being asked about.
+///
+/// The unit is a "tick": one multiple of the engine's own recent average per-tick CPU cost.
+/// It is deliberately not milliseconds -- the budget is denominated in this ratio, and the
+/// same bot gets a different millisecond figure on a faster judge machine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Budget {
+    /// Ticks left in the bank. Refills by [`Budget::REFILL`] every tick, capped at
+    /// [`Budget::BANK`]. **Can be negative**: an overspend is a debt, and while it is
+    /// negative the bot is not called at all -- each skipped tick pays some of it back.
+    pub remaining: i64,
+    /// What the bot's previous tick cost it, in the same unit. `0` before the first charge,
+    /// and on the tick after one the engine could not measure.
+    pub last_charge: u64,
+}
+
+impl Budget {
+    /// The bank a bot starts the match with, and its ceiling.
+    pub const BANK: i64 = COMPUTE_BANK_TICKS;
+    /// What the bank refills by each tick.
+    pub const REFILL: i64 = COMPUTE_REFILL_TICKS;
+}
+
+/// The last budget the engine published, snapshotted by `BotChannel::await_tick`.
+///
+/// A pair of atomics rather than a `Cell` on the channel for the same reason `CONFIG` above
+/// is a global: strategy code that wants this is arbitrarily deep inside a
+/// `Fn(&GameState) -> FleetAction`, and threading the channel through every helper to reach
+/// it would be pure noise. The two are written and read together on one thread, so they
+/// never disagree in practice; `Relaxed` is enough because the `handoff` acquire-load in
+/// `await_tick` already ordered the mapping read that produced them.
+static BUDGET_REMAINING: AtomicI64 = AtomicI64::new(Budget::BANK);
+static BUDGET_LAST_CHARGE: AtomicU64 = AtomicU64::new(0);
+
+/// What this bot has left to spend. Valid from the first tick onwards.
+///
+/// The point of it is deciding what you can afford *this* tick -- gate an expensive search on
+/// `get_budget().remaining`, and fall back to something cheap when the bank is low, rather
+/// than being sat out for the ticks it takes to pay the overspend back.
+pub fn get_budget() -> Budget {
+    Budget {
+        remaining: BUDGET_REMAINING.load(Ordering::Relaxed),
+        last_charge: BUDGET_LAST_CHARGE.load(Ordering::Relaxed),
+    }
 }
 
 /// A bot's end of the channel.
@@ -394,6 +482,19 @@ impl BotChannel {
         );
         let state = unsafe { &*(frame.add(Frame::PAYLOAD_OFFSET) as *const GameState) };
 
+        // Before the clock starts, so the bot is not billed for reading its own meter. The
+        // `handoff` acquire-load above already ordered these bytes.
+        unsafe {
+            BUDGET_REMAINING.store(
+                *(self.at(offset_of!(SharedBlock, budget_remaining)) as *const i64),
+                Ordering::Relaxed,
+            );
+            BUDGET_LAST_CHARGE.store(
+                *(self.at(offset_of!(SharedBlock, budget_last_charge)) as *const u64),
+                Ordering::Relaxed,
+            );
+        }
+
         // The last thing before the bot gets the wheel: everything above is waiting, and a
         // bot is not charged for the engine's own turn. A caller with work of its own to
         // do before handing over -- the FFI's state snapshot -- re-stamps with
@@ -443,6 +544,15 @@ mod tests {
     // added `BotConfig` field already breaks every literal in the crate at once.
     use crate::game::config::test_conf;
     use crate::game::state::BotAction;
+
+    /// `BUDGET_REMAINING`/`BUDGET_LAST_CHARGE` are process-globals (see their doc comment):
+    /// exactly right for a real bot process, which only ever runs one `BotChannel`, but
+    /// this test binary spins up several `BotChannel`s across tests that `cargo test` runs
+    /// concurrently by default, and every `await_tick` clobbers the same pair of statics.
+    /// Any test that calls `await_tick` -- whether or not it looks at the budget -- has to
+    /// hold this for its whole body, or an unrelated test's tick can overwrite the globals
+    /// mid-assertion.
+    static BUDGET_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     /// Runs the bot side of a test on its own thread, against the same backing file.
     ///
@@ -517,6 +627,7 @@ mod tests {
     /// back in `EngineChannel::request` -- without needing a real separate bot process.
     #[tokio::test]
     async fn reports_bot_cpu_time() {
+        let _guard = BUDGET_TEST_LOCK.lock().unwrap();
         let engine_channel = EngineChannel::new().unwrap();
 
         let conf = test_conf::conf();
@@ -531,7 +642,7 @@ mod tests {
             bot_channel.respond(FleetAction::default());
         });
 
-        let res = engine_channel.request::<TickProtocol>(&state, Duration::from_secs(5)).await;
+        let res = engine_channel.request::<TickProtocol>(&state, Some(Duration::from_secs(5))).await;
         bot.join().unwrap();
         let (action, cpu_time) = res.unwrap();
 
@@ -539,11 +650,52 @@ mod tests {
         assert!(cpu_time >= Duration::from_millis(10), "reported cpu_time was implausibly small: {cpu_time:?}");
     }
 
+    /// The other direction of the same plumbing: the engine publishes the bot's bank with
+    /// `set_budget`, `await_tick` snapshots it, and `get_budget` reads it back.
+    ///
+    /// The values are deliberately not the defaults -- a negative `remaining` is a real
+    /// state (an overspend is a debt) and would be indistinguishable from an unwritten
+    /// field if this used a positive one.
+    #[tokio::test]
+    async fn publishes_the_budget_to_the_bot() {
+        let _guard = BUDGET_TEST_LOCK.lock().unwrap();
+        let engine_channel = EngineChannel::new().unwrap();
+
+        let conf = test_conf::conf();
+        let state = GameState::new(conf);
+
+        engine_channel.set_budget(-1_200, 4_242);
+
+        let bot = bot_thread(engine_channel.backing_file_path(), |bot_channel| {
+            block_on(bot_channel.await_tick()).expect("the channel is open");
+            let budget = get_budget();
+            assert_eq!(budget.remaining, -1_200, "the bank should survive the handoff");
+            assert_eq!(budget.last_charge, 4_242);
+            bot_channel.respond(FleetAction::default());
+        });
+
+        engine_channel
+            .request::<TickProtocol>(&state, Some(Duration::from_secs(5)))
+            .await
+            .unwrap();
+        bot.join().unwrap();
+    }
+
+    /// The bank's size and refill are what a bot compares `get_budget().remaining` against,
+    /// so they have to be the same numbers the engine enforces -- not a copy that drifts.
+    #[test]
+    fn the_published_limits_are_the_enforced_ones() {
+        assert_eq!(Budget::BANK, COMPUTE_BANK_TICKS);
+        assert_eq!(Budget::REFILL, COMPUTE_REFILL_TICKS);
+        assert_eq!(Budget::BANK, crate::timing::ComputeBudget::new().remaining());
+    }
+
     /// The end of a match is an ordinary event, not a failure: `await_tick` reports it as
     /// `None` so the bot's loop ends and the process exits 0. Before `Handoff::Closed` was
     /// ever read, this hung until the engine sent SIGKILL.
     #[tokio::test]
     async fn a_closed_channel_ends_the_bot_loop() {
+        let _guard = BUDGET_TEST_LOCK.lock().unwrap();
         let engine_channel = EngineChannel::new().unwrap();
         let bot_channel = BotChannel::from_path(engine_channel.backing_file_path()).unwrap();
 
@@ -559,6 +711,7 @@ mod tests {
     /// a bot actually is when a match ends.
     #[test]
     fn a_channel_closed_while_the_bot_waits_ends_the_bot_loop() {
+        let _guard = BUDGET_TEST_LOCK.lock().unwrap();
         let engine_channel = EngineChannel::new().unwrap();
 
         let bot = bot_thread(engine_channel.backing_file_path(), |bot_channel| {
@@ -584,7 +737,7 @@ mod tests {
 
         let timeout = Duration::from_millis(50);
         let start = Instant::now();
-        let res = engine_channel.request::<TickProtocol>(&state, timeout).await;
+        let res = engine_channel.request::<TickProtocol>(&state, Some(timeout)).await;
         let waited = start.elapsed();
 
         assert!(
@@ -607,6 +760,7 @@ mod tests {
     /// written the way an FFI bot writes it: straight into the mapping.
     #[tokio::test]
     async fn an_invalid_action_is_refused_before_it_is_read() {
+        let _guard = BUDGET_TEST_LOCK.lock().unwrap();
         let engine_channel = EngineChannel::new().unwrap();
 
         let conf = test_conf::conf();
@@ -631,7 +785,7 @@ mod tests {
             handoff_byte(&bot_channel.mmap).store(Handoff::EngineTurn as u8, Ordering::Release);
         });
 
-        let res = engine_channel.request::<TickProtocol>(&state, Duration::from_secs(5)).await;
+        let res = engine_channel.request::<TickProtocol>(&state, Some(Duration::from_secs(5))).await;
         bot.join().unwrap();
 
         assert!(

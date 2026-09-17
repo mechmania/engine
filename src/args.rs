@@ -18,6 +18,12 @@ pub struct ArgConfig {
     /// output sources redirected to file, format: a:foo.txt g:log.json
     #[arg(short = 'o', long = "output", value_parser = parse_output_mappings)]
     pub output: Option<Vec<OutputMapping>>,
+    /// run without the compute budget or the per-tick hang timeout -- a bot is never sat out
+    /// and never timed out, however long it takes. For local development (a debugger, a
+    /// profiler) only: costs are still measured and still reported to the bot, they just
+    /// stop being enforced. A tournament never runs with this.
+    #[arg(long = "no-time-limit")]
+    pub no_time_limit: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

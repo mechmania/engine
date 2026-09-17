@@ -33,6 +33,13 @@ struct BotManager {
     channel: EngineChannel,
     name: String,
     budget: ComputeBudget,
+    /// What the bot's last charged tick cost, republished to it on the next one. Held here
+    /// rather than read back out of `ComputeBudget` because the bank folds the refill and
+    /// the charge into one number and cannot tell them apart afterwards.
+    last_charge: u64,
+    /// `--no-time-limit` turns this off: costs are still measured and still published, but a
+    /// bot is never sat out, never forfeits and never times out. Local development only.
+    enforce_time: bool,
     process: tokio::process::Child,
     io_task: tokio::task::JoinHandle<()>,
 }
@@ -44,6 +51,7 @@ impl BotManager {
         source: OutputSource,
         err_source: OutputSource,
         tx: mpsc::UnboundedSender<Message>,
+        enforce_time: bool,
     ) -> anyhow::Result<Self> {
         let channel = EngineChannel::new()?;
         let mut process = Command::new(command)
@@ -84,6 +92,8 @@ impl BotManager {
             channel,
             name: name.to_string(),
             budget: ComputeBudget::new(),
+            last_charge: 0,
+            enforce_time,
             process,
             io_task,
         })
@@ -102,7 +112,7 @@ impl BotManager {
     async fn handshake(&mut self, request: &HandshakeRequest) {
         if !self
             .channel
-            .request::<HandshakeProtocol>(request, HANDSHAKE_TIMEOUT)
+            .request::<HandshakeProtocol>(request, Some(HANDSHAKE_TIMEOUT))
             .await
             .map_err(|e| {
                 eprintln!("### FATAL ERROR: bot {} failed handshake: {}", self.name, e);
@@ -135,20 +145,33 @@ impl BotManager {
         if self.exited() {
             return Default::default();
         }
+        // Out of compute: sit this tick out. The bot is still waiting on the channel and
+        // simply sees a later tick next time it is asked.
+        if self.enforce_time && self.budget.is_exhausted() {
+            self.budget.refill();
+            return Default::default();
+        }
 
+        // What it has to spend on the tick it is about to be handed, and what the last one
+        // cost it. Published before the request, so the handoff that delivers the state
+        // delivers these with it.
+        self.channel.set_budget(self.budget.remaining(), self.last_charge);
+
+        let timeout = self.enforce_time.then_some(TICK_HANG_TIMEOUT);
         let res = match self
             .channel
-            .request::<TickProtocol>(state, TICK_HANG_TIMEOUT)
+            .request::<TickProtocol>(state, timeout)
             .await
         {
             Ok((res, cpu_time)) => {
-                let elapsed = self.budget.charge(cpu_time, engine_time);
-                // println!("bot {} took {} ticks", self.name, elapsed);
+                // Charged even with enforcement off: the measurement is the whole point of
+                // `--no-time-limit`, it is only the consequence that is suspended.
+                self.last_charge = self.budget.charge(cpu_time, engine_time);
                 res
             }
             Err(e) => {
                 eprintln!("### [bot {}] error on tick: {e}", self.name);
-                if e.forfeits_budget() {
+                if self.enforce_time && e.forfeits_budget() {
                     self.budget.forfeit();
                 }
                 Default::default()
@@ -219,9 +242,22 @@ pub async fn run(args: ArgConfig) -> Result<()> {
         serde_json::to_string(&conf)?
     );
 
+    // Loud, and in the log: a match run without enforcement is not a match, and its gamelog
+    // must never be mistaken for one.
+    let enforce_time = !args.no_time_limit;
+    if !enforce_time {
+        eprintln!(
+            "WARNING: --no-time-limit: the compute budget and the {:?} hang timeout are \
+             both off. Costs are still measured and reported to each bot, but nothing is \
+             enforced -- this is not how a tournament match runs.",
+            TICK_HANG_TIMEOUT,
+        );
+        send!(tx, OutputSource::Gamelog, "# time enforcement: disabled");
+    }
+
     let (mut bot_a, mut bot_b) = (
-        BotManager::spawn(&args.bot_a, "A", OutputSource::BotA, OutputSource::BotAErr, tx.clone())?,
-        BotManager::spawn(&args.bot_b, "B", OutputSource::BotB, OutputSource::BotBErr, tx.clone())?,
+        BotManager::spawn(&args.bot_a, "A", OutputSource::BotA, OutputSource::BotAErr, tx.clone(), enforce_time)?,
+        BotManager::spawn(&args.bot_b, "B", OutputSource::BotB, OutputSource::BotBErr, tx.clone(), enforce_time)?,
     );
 
     let start = Instant::now();

@@ -159,6 +159,10 @@ mm_ffi_const! {
     "MM_MALFORMED": MM_MALFORMED as usize,
     "MM_IO": MM_IO as usize,
     "MM_PANIC": MM_PANIC as usize,
+    // The budget a bot compares `mm_channel_budget`'s answer against. Emitted rather than
+    // written into the Python by hand, for the same reason every struct here is generated.
+    "COMPUTE_BANK_TICKS": crate::ipc::COMPUTE_BANK_TICKS as usize,
+    "COMPUTE_REFILL_TICKS": crate::ipc::COMPUTE_REFILL_TICKS as usize,
 }
 
 // The name is spelled out rather than `stringify!`d: a field records its type the way the
@@ -282,7 +286,7 @@ pub unsafe fn mm_channel_open(path: *const u8, path_len: i32) -> *mut MmChannel 
     let Ok(path) = std::str::from_utf8(bytes) else {
         return std::ptr::null_mut();
     };
-    // `await_handoff` is a pure spin, so nothing here needs a driver; `enable_time` is kept
+    // `await_handoff` never awaits (it spins, then yields), so nothing here needs a driver; `enable_time` is kept
     // only so a future await does not panic. There is no IO driver and no worker pool.
     let Ok(rt) = tokio::runtime::Builder::new_current_thread().enable_time().build() else {
         return std::ptr::null_mut();
@@ -370,6 +374,39 @@ pub fn mm_channel_state(ch: *const MmChannel) -> *const GameState {
         Some(state) => state as *const GameState,
         None => std::ptr::null(),
     }
+}
+
+/// What this bot has left to spend, as of the tick `mm_channel_await_tick` last delivered.
+///
+/// Both out-parameters are in "ticks" -- multiples of the engine's own recent average
+/// per-tick CPU cost, which is the unit the budget is actually denominated in. `remaining`
+/// can be negative: an overspend is a debt, and while it is negative the bot is not called
+/// at all. The bank's size and refill are the `COMPUTE_BANK_TICKS` / `COMPUTE_REFILL_TICKS`
+/// constants.
+///
+/// Reads the values `BotChannel::await_tick` snapshotted, so it costs nothing and can be
+/// called as often as a strategy likes. Before the first tick it reports a full bank.
+///
+/// # Safety
+/// Both out-pointers must be valid for a write.
+#[mm_ffi_fn(panic = MM_PANIC)]
+pub unsafe fn mm_channel_budget(
+    ch: *const MmChannel,
+    out_remaining: *mut i64,
+    out_last_charge: *mut u64,
+) -> i32 {
+    if ch.is_null() {
+        return MM_PANIC;
+    }
+    if out_remaining.is_null() || out_last_charge.is_null() {
+        return MM_MALFORMED;
+    }
+    let budget = crate::ipc::get_budget();
+    unsafe {
+        out_remaining.write(budget.remaining);
+        out_last_charge.write(budget.last_charge);
+    }
+    MM_OK
 }
 
 /// Hands `action` back and ends the bot's turn, reporting the CPU time spent since
@@ -614,6 +651,7 @@ mod ffi_test {
         fn mm_channel_config(ch: *const MmChannel) -> *const GameConfig;
         fn mm_channel_await_tick(ch: *mut MmChannel) -> i32;
         fn mm_channel_state(ch: *const MmChannel) -> *const GameState;
+        fn mm_channel_budget(ch: *const MmChannel, out_remaining: *mut i64, out_last_charge: *mut u64) -> i32;
         fn mm_channel_respond(ch: *mut MmChannel, action: *const FleetAction) -> i32;
         fn mm_channel_free(ch: *mut MmChannel);
         fn mm_navigate_to(
@@ -997,11 +1035,11 @@ mod ffi_test {
                 config: conf.clone(),
             };
             let (magic, _) = engine
-                .request::<HandshakeProtocol>(&request, Duration::from_secs(10))
+                .request::<HandshakeProtocol>(&request, Some(Duration::from_secs(10)))
                 .await
                 .expect("the handshake should complete");
             let (action, cpu_time) = engine
-                .request::<TickProtocol>(&state, Duration::from_secs(10))
+                .request::<TickProtocol>(&state, Some(Duration::from_secs(10)))
                 .await
                 .expect("the tick should complete");
             engine.close();
@@ -1112,7 +1150,7 @@ mod ffi_test {
         // registry is asserted here where a shortfall is unambiguous.
         //
         // The `mm_test_panics_*` probes below register too, hence the two extra.
-        assert_eq!(fns.len(), 17 + 2, "registered entry points: {fns:?}");
+        assert_eq!(fns.len(), 18 + 2, "registered entry points: {fns:?}");
     }
 }
 
@@ -1287,7 +1325,14 @@ mod mirror_test {
         assert_eq!(consts["MM_MALFORMED"], 3);
         assert_eq!(consts["MM_IO"], 4);
         assert_eq!(consts["MM_PANIC"], 5);
-        assert_eq!(consts.len(), 9);
+
+        // The budget limits a bot compares `mm_channel_budget`'s answer against. Pinned to
+        // the `ipc` constants rather than to literals: the point of emitting them at all is
+        // that Python and the engine cannot disagree about the bank.
+        assert_eq!(consts["COMPUTE_BANK_TICKS"], crate::ipc::COMPUTE_BANK_TICKS as usize);
+        assert_eq!(consts["COMPUTE_REFILL_TICKS"], crate::ipc::COMPUTE_REFILL_TICKS as usize);
+
+        assert_eq!(consts.len(), 11);
     }
 
     /// The cross-check that keeps size division honest. A declared length is only useful if
