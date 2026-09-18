@@ -464,13 +464,29 @@ fn step_blasters(
             .map(|bot| bot.id)
             .collect();
         for id in dead {
-            state.fleets_mut()[team].remove(id);
-            // Release whatever extraction slot it held, so a dead bot never lingers in a
-            // gamelog line holding one. `step_extractors` would drop it next tick anyway;
-            // this just keeps the state honest within the tick it died.
-            for deposit in TEAMS {
-                state.deposits_mut()[deposit].extractors[team] &= !(1u32 << id);
-            }
+            remove_bot(state, team, id);
+        }
+    }
+}
+
+/// Removes a bot from its fleet, releasing whatever extraction slot it held so a dead bot
+/// never lingers in a gamelog line holding one. `step_extractors` would drop it next tick
+/// anyway; this just keeps the state honest within the tick it died.
+fn remove_bot(state: &mut GameState, team: Team, id: BotId) {
+    state.fleets_mut()[team].remove(id);
+    for deposit in TEAMS {
+        state.deposits_mut()[deposit].extractors[team] &= !(1u32 << id);
+    }
+}
+
+/// A bot whose action requested self-destruct this tick dies instantly -- no damage to
+/// anything else, just removal. Runs after damage, so a self-destructing bot still gets to
+/// act (move, fire, heal, extract) on the tick it blows itself up, the same as one that dies
+/// to a blast.
+fn step_self_destruct(state: &mut GameState, bot_actions: &[(Team, BotId, &BotAction)]) {
+    for (team, id, action) in bot_actions {
+        if action.self_destruct {
+            remove_bot(state, *team, *id);
         }
     }
 }
@@ -777,6 +793,10 @@ pub fn eval_tick(
 
     // damage
     step_blasters(state, conf, &bot_actions);
+
+    // self-destruct -- after damage, so a bot that dies to a blast this tick is removed by
+    // the same sweep either way and this step has nothing left to do for it.
+    step_self_destruct(state, &bot_actions);
 
     state.tick += 1;
 }
@@ -1957,6 +1977,78 @@ mod fabricator_test {
 
         eval_tick(&mut s, &conf, rush(), FleetAction::new());
         assert_eq!(s.fleets()[Team::A].len, before + 1);
+    }
+}
+
+#[cfg(test)]
+mod self_destruct_test {
+    use super::*;
+    use crate::game::config::test_conf;
+
+    fn conf() -> GameConfig {
+        test_conf::conf().clone()
+    }
+
+    /// A state with one full-health bot in each fleet, both parked at the same point --
+    /// self-destruct has no splash, so where they stand does not matter.
+    fn state(conf: &GameConfig) -> GameState {
+        let mut s = GameState::new(conf);
+        for team in TEAMS {
+            let id = s.fleets_mut()[team].add();
+            reset_bot(team, id, Vec2::new(16.0, 16.0), BotClass::Battle, &mut s, conf);
+        }
+        s
+    }
+
+    fn pairs<'a>(
+        state: &GameState,
+        a: &'a FleetAction,
+        b: &'a FleetAction,
+    ) -> Vec<(Team, BotId, &'a BotAction)> {
+        let mut res = Vec::new();
+        for (team, actions) in [(Team::A, a), (Team::B, b)] {
+            for bot in state.fleets()[team].iter() {
+                res.push((team, bot.id, &actions.bots[bot.id as usize]));
+            }
+        }
+        res
+    }
+
+    #[test]
+    fn a_self_destructing_bot_is_removed_with_no_other_effect() {
+        let conf = conf();
+        let mut s = state(&conf);
+        let destructing = s.fleets()[Team::A].iter().next().unwrap().id;
+        let enemy = s.fleets()[Team::B].iter().next().unwrap().id;
+        let enemy_health_before = s.fleets()[Team::B][enemy].health;
+
+        let mut a = FleetAction::new();
+        a.bots[destructing as usize].self_destruct = true;
+        let b = FleetAction::new();
+        let actions = pairs(&s, &a, &b);
+
+        step_self_destruct(&mut s, &actions);
+
+        assert_eq!(s.fleets()[Team::A].len, 0, "the self-destructing bot is gone");
+        assert_eq!(s.fleets()[Team::B].len, 1, "the enemy fleet is untouched");
+        assert_eq!(
+            s.fleets()[Team::B][enemy].health,
+            enemy_health_before,
+            "no splash damage to anything else"
+        );
+    }
+
+    #[test]
+    fn not_self_destructing_leaves_both_fleets_alone() {
+        let conf = conf();
+        let mut s = state(&conf);
+        let (a, b) = (FleetAction::new(), FleetAction::new());
+        let actions = pairs(&s, &a, &b);
+
+        step_self_destruct(&mut s, &actions);
+
+        assert_eq!(s.fleets()[Team::A].len, 1);
+        assert_eq!(s.fleets()[Team::B].len, 1);
     }
 }
 
