@@ -202,7 +202,7 @@ pub async fn run(args: ArgConfig) -> Result<()> {
             // One healer exactly cancels one battle bot's sustained damage
             // (blaster_damage / blaster_cooldown = 3.0 / 60 = 0.05).
             heal_per_tick: 0.05,
-            extract_rate: 0.1,
+            extract_rate: 0.05,
             base_invulnerability_ticks: 15,
             base_blaster_splash_radius: 0.3,
             base_heal_range: 3.0,
@@ -220,14 +220,11 @@ pub async fn run(args: ArgConfig) -> Result<()> {
         deposit: DepositConfig {
             pos: DEPOSIT_POS,
             radius: 0.5,
-            // One extractor is worth 0.1 tokens/tick, so a saturated deposit pays 1.6.
+            // One extractor is worth 0.05 tokens/tick, so a saturated deposit pays 0.8.
             extractor_cap: 16,
         },
         fabricator: FabricatorConfig {
             interval: 200,
-            // Around 500 extractor-ticks: a fleet mining with four extractors buys a rush
-            // roughly every 125 ticks, so paying for bodies beats waiting but does not
-            // trivially outrun the free cadence.
             rush_cost: 50.0,
             // Sixteen rush orders' worth.
             starting_tokens: 800.0,
