@@ -608,13 +608,13 @@ pub fn route_waypoints(conf: &GameConfig, from: Vec2, to: Vec2) -> Option<Vec<Ve
 /// re-routes for free as the bot moves.
 pub fn navigate_to(conf: &GameConfig, from: Vec2, to: Vec2) -> Vec2 {
     if corridor_clear(conf, from, to) {
-        return to - from;
+        return (to - from) / conf.bot.speed;
     }
 
     let Some((first, last, _)) = best_route(conf, from, to) else {
         // Nowhere to route through -- wedged against a wall, or the target is somewhere no
         // bot can stand. Shove at it and let `handle_collision` slide us along the face.
-        return to - from;
+        return (to - from) / conf.bot.speed;
     };
 
     // String-pulling: the route's first hop is a valid aim, but a later one may already be
@@ -633,7 +633,7 @@ pub fn navigate_to(conf: &GameConfig, from: Vec2, to: Vec2) -> Vec2 {
         steps += 1;
     }
 
-    topo.verts[aim as usize] - from
+    (topo.verts[aim as usize] - from) / conf.bot.speed
 }
 
 // Plain `cfg(test)`: nothing here is engine-only, and the FFI conformance test in
