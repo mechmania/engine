@@ -221,7 +221,7 @@ pub async fn run(args: ArgConfig) -> Result<()> {
             pos: DEPOSIT_POS,
             radius: 0.5,
             // One extractor is worth 0.05 tokens/tick, so a saturated deposit pays 0.8.
-            extractor_cap: 16,
+            extractor_cap: 8,
         },
         fabricator: FabricatorConfig {
             interval: 200,
