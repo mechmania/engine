@@ -483,9 +483,14 @@ fn remove_bot(state: &mut GameState, team: Team, id: BotId) {
 /// anything else, just removal. Runs after damage, so a self-destructing bot still gets to
 /// act (move, fire, heal, extract) on the tick it blows itself up, the same as one that dies
 /// to a blast.
+///
+/// `bot_actions` is flattened before the tick's deaths, so a bot that self-destructed *and*
+/// was killed by a blast this tick is still listed here after `step_blasters` already swept
+/// it. The membership check is what makes that case a no-op -- `BotArray::remove` asserts,
+/// so removing twice would panic the engine mid-match.
 fn step_self_destruct(state: &mut GameState, bot_actions: &[(Team, BotId, &BotAction)]) {
     for (team, id, action) in bot_actions {
-        if action.self_destruct {
+        if action.self_destruct && state.fleets()[*team].get(*id).is_some() {
             remove_bot(state, *team, *id);
         }
     }
@@ -2036,6 +2041,29 @@ mod self_destruct_test {
             enemy_health_before,
             "no splash damage to anything else"
         );
+    }
+
+    /// `bot_actions` is built before the tick's deaths, so a bot killed by `step_blasters`
+    /// is still in the list when `step_self_destruct` runs. Removing it a second time used
+    /// to trip the assert in `BotArray::remove` and panic the engine mid-match.
+    #[test]
+    fn dying_to_a_blast_and_self_destructing_on_the_same_tick_is_not_a_double_removal() {
+        let conf = conf();
+        let mut s = state(&conf);
+        let doomed = s.fleets()[Team::A].iter().next().unwrap().id;
+
+        let mut a = FleetAction::new();
+        a.bots[doomed as usize].self_destruct = true;
+        let b = FleetAction::new();
+        let actions = pairs(&s, &a, &b);
+
+        // stand in for the death sweep at the end of `step_blasters`
+        remove_bot(&mut s, Team::A, doomed);
+
+        step_self_destruct(&mut s, &actions);
+
+        assert_eq!(s.fleets()[Team::A].len, 0, "still gone, and no panic");
+        assert_eq!(s.fleets()[Team::B].len, 1, "the enemy fleet is untouched");
     }
 
     #[test]
